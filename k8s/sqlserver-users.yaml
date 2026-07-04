@@ -1,0 +1,62 @@
+# Dedicated SQL Server instance for the Users service (UserGamesFiap database) —
+# separate from Catalog's own sqlserver.yaml, since each service owns its database.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sqlserver-users
+  namespace: fiapgames
+  labels:
+    app: sqlserver-users
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sqlserver-users
+  template:
+    metadata:
+      labels:
+        app: sqlserver-users
+    spec:
+      containers:
+        - name: sqlserver-users
+          image: mcr.microsoft.com/mssql/server:2022-latest
+          env:
+            - name: ACCEPT_EULA
+              value: "Y"
+            - name: MSSQL_SA_PASSWORD
+              value: "RootPassword123!"
+          ports:
+            - containerPort: 1433
+          readinessProbe:
+            exec:
+              command: ["/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", "RootPassword123!", "-C", "-Q", "SELECT 1"]
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 10
+          volumeMounts:
+            - name: sqlserver-users-data
+              mountPath: /var/opt/mssql
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "1Gi"
+            limits:
+              cpu: "1"
+              memory: "2Gi"
+      volumes:
+        - name: sqlserver-users-data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sqlserver-users
+  namespace: fiapgames
+  labels:
+    app: sqlserver-users
+spec:
+  selector:
+    app: sqlserver-users
+  ports:
+    - port: 1433
+      targetPort: 1433
