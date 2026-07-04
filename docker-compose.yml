@@ -1,0 +1,142 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: fiapgames-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: fiapgames-admin
+      RABBITMQ_DEFAULT_PASS: FiapGames@Admin123
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+
+  sqlserver-catalog:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: fiapgames-catalog-sqlserver
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "FiapGames@Admin123"
+    ports:
+      - "1433:1433"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q 'SELECT 1' -b -o /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - sqlserver-catalog-data:/var/opt/mssql
+
+  postgres-payments:
+    image: postgres:16
+    container_name: fiapgames-payments-postgres
+    environment:
+      POSTGRES_USER: fiapgames-admin
+      POSTGRES_PASSWORD: FiapGames@Admin123
+      POSTGRES_DB: fiapgames-payments
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fiapgames-admin -d fiapgames-payments"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - postgres-payments-data:/var/lib/postgresql/data
+
+  postgres-notifications:
+    image: postgres:16
+    container_name: fiapgames-notifications-postgres
+    environment:
+      POSTGRES_USER: fiapgames-admin
+      POSTGRES_PASSWORD: FiapGames@Admin123
+      POSTGRES_DB: fiapgames-notifications
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fiapgames-admin -d fiapgames-notifications"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - postgres-notifications-data:/var/lib/postgresql/data
+
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: fiapgames-mailhog
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+  catalog-api:
+    build:
+      context: ../FiapGames.Catalog
+      dockerfile: Dockerfile
+    container_name: fiapgames-catalog
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      sqlserver-catalog:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      ConnectionStrings__SqlServer: "Server=sqlserver-catalog,1433;Database=fiapgames-catalog;User Id=sa;Password=FiapGames@Admin123;TrustServerCertificate=True"
+      RabbitMq__Host: rabbitmq
+      RabbitMq__VirtualHost: "/"
+      RabbitMq__UserName: fiapgames-admin
+      RabbitMq__Password: FiapGames@Admin123
+
+  payments-api:
+    build:
+      context: ../FiapGames.Payments
+      dockerfile: Dockerfile
+    container_name: fiapgames-payments
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres-payments:
+        condition: service_healthy
+    ports:
+      - "8081:8080"
+    environment:
+      ConnectionStrings__Postgres: "Host=postgres-payments;Port=5432;Database=fiapgames-payments;Username=fiapgames-admin;Password=FiapGames@Admin123"
+      RabbitMq__Host: rabbitmq
+      RabbitMq__VirtualHost: "/"
+      RabbitMq__UserName: fiapgames-admin
+      RabbitMq__Password: FiapGames@Admin123
+
+  notifications-api:
+    build:
+      context: ../FiapGames.Notifications
+      dockerfile: Dockerfile
+    container_name: fiapgames-notifications
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres-notifications:
+        condition: service_healthy
+      mailhog:
+        condition: service_started
+    ports:
+      - "8082:8080"
+    environment:
+      ConnectionStrings__Postgres: "Host=postgres-notifications;Port=5432;Database=fiapgames-notifications;Username=fiapgames-admin;Password=FiapGames@Admin123"
+      RabbitMq__Host: rabbitmq
+      RabbitMq__VirtualHost: "/"
+      RabbitMq__UserName: fiapgames-admin
+      RabbitMq__Password: FiapGames@Admin123
+      Smtp__Host: mailhog
+      Smtp__Port: 1025
+      Smtp__From: noreply@fiapgames.local
+
+volumes:
+  rabbitmq-data:
+  sqlserver-catalog-data:
+  postgres-payments-data:
+  postgres-notifications-data:

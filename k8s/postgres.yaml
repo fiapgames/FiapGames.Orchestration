@@ -1,0 +1,98 @@
+# Single shared Postgres instance used by both Payments and Notifications
+# (matches the hostname their k8s Secrets already reference: postgres.fiapgames.svc.cluster.local).
+# The init script creates one database per service on first startup.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init-scripts
+  namespace: fiapgames
+data:
+  create-multiple-databases.sh: |
+    #!/bin/bash
+    set -e
+    set -u
+
+    function create_database() {
+      local database=$1
+      echo "Creating database '$database'"
+      psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" <<-EOSQL
+        CREATE DATABASE "$database";
+        GRANT ALL PRIVILEGES ON DATABASE "$database" TO "$POSTGRES_USER";
+    EOSQL
+    }
+
+    if [ -n "${POSTGRES_MULTIPLE_DATABASES:-}" ]; then
+      echo "Multiple database creation requested: $POSTGRES_MULTIPLE_DATABASES"
+      for db in $(echo "$POSTGRES_MULTIPLE_DATABASES" | tr ',' ' '); do
+        create_database "$db"
+      done
+    fi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: fiapgames
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          env:
+            - name: POSTGRES_USER
+              value: "fiapgames-admin"
+            - name: POSTGRES_PASSWORD
+              value: "FiapGames@Admin123"
+            - name: POSTGRES_MULTIPLE_DATABASES
+              value: "fiapgames-payments,fiapgames-notifications"
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "fiapgames-admin"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 10
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+            - name: init-scripts
+              mountPath: /docker-entrypoint-initdb.d
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      volumes:
+        - name: postgres-data
+          emptyDir: {}
+        - name: init-scripts
+          configMap:
+            name: postgres-init-scripts
+            defaultMode: 0755
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: fiapgames
+  labels:
+    app: postgres
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432

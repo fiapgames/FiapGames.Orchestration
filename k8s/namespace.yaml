@@ -1,0 +1,6 @@
+# Shared across all FiapGames microservices. Kept here (and duplicated,
+# idempotently, in each microservice repo) so every repo is deployable standalone.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fiapgames
