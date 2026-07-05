@@ -82,16 +82,17 @@ docker compose down -v
 
 ## Deploy no Kubernetes
 
-> **Status atual: só Catalog, Payments e Notifications foram testados no cluster Kind.** O `users-api` ainda não tem manifests de infraestrutura (SQL Server) nem Deployment/Service aqui — falta integrar, seguindo o mesmo padrão dos demais. O `Fiap.Games.Users` já tem sua própria pasta `k8s/` (com `rabbitmq.yaml`/`sqlserver.yaml` próprios), que ainda não foi reconciliada com os manifestos de infra compartilhados deste repositório — pode haver duplicação/conflito de nomes a resolver antes do deploy conjunto.
+> **Status atual: os 4 microsserviços foram testados no cluster Kind.** O `Fiap.Games.Users` originalmente trazia sua própria pasta `k8s/` isolada (namespace `games-fiap`, RabbitMQ e SQL Server próprios) — foi reconciliada para usar o namespace e a infraestrutura compartilhados (`fiapgames`), do mesmo jeito que os outros três. Os manifestos de infra e RabbitMQ próprios do Users foram removidos (`00-namespace.yaml`, `rabbitmq.yaml`, `sqlserver.yaml`, `kustomization.yaml`); um novo `sqlserver-users.yaml` (SQL Server dedicado do Users, já que cada serviço tem seu próprio banco) foi adicionado aqui, em `k8s/`.
 
-Cada microsserviço mantém seus próprios manifestos (`Deployment`, `ConfigMap`, `Secret`, e no caso do Catalog também `Service`) em `k8s/` no respectivo repositório. Esses manifestos assumem que a infraestrutura compartilhada (RabbitMQ, Postgres, SQL Server, Mailhog) já existe no cluster com hostnames fixos:
+Cada microsserviço mantém seus próprios manifestos (`Deployment`, `ConfigMap`/`Secret`, e no caso do Catalog e do Users também `Service`) em `k8s/` no respectivo repositório. Esses manifestos assumem que a infraestrutura compartilhada (RabbitMQ, Postgres, SQL Server, Mailhog) já existe no cluster com hostnames fixos:
 
-- `rabbitmq.fiapgames.svc.cluster.local` (Payments, Notifications, Catalog)
+- `rabbitmq.fiapgames.svc.cluster.local` (Payments, Notifications, Catalog, Users)
 - `postgres.fiapgames.svc.cluster.local` (um único Postgres compartilhado — Payments e Notifications usam bases diferentes nele: `fiapgames-payments` e `fiapgames-notifications`)
 - `sqlserver.fiapgames.svc.cluster.local` (Catalog)
+- `sqlserver-users.fiapgames.svc.cluster.local` (Users — banco próprio, separado do SQL Server do Catalog)
 - `mailhog.fiapgames.svc.cluster.local` (Notifications)
 
-Nenhum repositório de microsserviço traz manifesto de Deployment/Service para essa infraestrutura — por isso os manifestos de infra (`rabbitmq.yaml`, `postgres.yaml`, `sqlserver.yaml`, `mailhog.yaml`) vivem aqui, em `k8s/`.
+Nenhum repositório de microsserviço traz manifesto de Deployment/Service para essa infraestrutura — por isso os manifestos de infra (`rabbitmq.yaml`, `postgres.yaml`, `sqlserver.yaml`, `sqlserver-users.yaml`, `mailhog.yaml`) vivem aqui, em `k8s/`. O Users também tem um `migration-job.yaml` (`Job` do Kubernetes que roda `dotnet ... --migrate` uma vez antes do Deployment subir) — os outros três serviços aplicam as migrations automaticamente no startup do próprio processo, o Users prefere um Job separado (evita corrida entre múltiplas réplicas migrando ao mesmo tempo).
 
 ### Passo a passo testado (cluster local com Kind)
 
@@ -109,19 +110,23 @@ docker compose build
 docker tag fiapgamesorchestration-catalog-api:latest brendhom/fiapgames-catalog-api:latest
 docker tag fiapgamesorchestration-payments-api:latest lucasceifador/fiapgames-payments-api:latest
 docker tag fiapgamesorchestration-notifications-api:latest lucasceifador/fiapgames-notifications-api:latest
+docker tag fiapgamesorchestration-users-api:latest user-games-fiap:latest
 
 # 5. carrega as imagens direto no cluster kind (sem precisar de um registry)
 kind load docker-image brendhom/fiapgames-catalog-api:latest --name fiapgames
 kind load docker-image lucasceifador/fiapgames-payments-api:latest --name fiapgames
 kind load docker-image lucasceifador/fiapgames-notifications-api:latest --name fiapgames
+kind load docker-image user-games-fiap:latest --name fiapgames
 
 # 6. aplica os manifestos de cada microsserviço
 kubectl apply -f ../FiapGames.Catalog/k8s/
 kubectl apply -f ../FiapGames.Payments/k8s/
 kubectl apply -f ../FiapGames.Notifications/k8s/
+kubectl apply -f ../Fiap.Games.Users/k8s/
 
 # 7. como as imagens não estão publicadas num registry real, force o cluster a usar
 #    a imagem carregada localmente em vez de tentar puxar do Docker Hub
+#    (o user-api.yaml e o migration-job.yaml do Users já vêm com imagePullPolicy: IfNotPresent, não precisam de patch)
 kubectl patch deployment catalog-api -n fiapgames -p '{"spec":{"template":{"spec":{"containers":[{"name":"catalog-api","imagePullPolicy":"IfNotPresent"}]}}}}'
 kubectl patch deployment payments-api -n fiapgames -p '{"spec":{"template":{"spec":{"containers":[{"name":"payments-api","imagePullPolicy":"IfNotPresent"}]}}}}'
 kubectl patch deployment notifications-api -n fiapgames -p '{"spec":{"template":{"spec":{"containers":[{"name":"notifications-api","imagePullPolicy":"IfNotPresent"}]}}}}'
@@ -131,36 +136,46 @@ kubectl get pods -n fiapgames
 
 > O passo 7 (`imagePullPolicy: IfNotPresent`) só é necessário para teste local com Kind, porque as imagens não foram publicadas de verdade no Docker Hub ainda. Depois que as imagens forem publicadas (`docker push`) e os manifestos apontarem para um registry real, isso deixa de ser necessário — o comportamento padrão (`imagePullPolicy: Always` para tag `latest`) volta a ser o correto.
 
-**Resultado esperado** — todos os 7 pods `1/1 Running`:
+**Resultado esperado** — todos os 9 pods `1/1 Running` + o Job de migration do Users `Completed`:
 
 ```
-NAME                                 READY   STATUS    RESTARTS   AGE
-catalog-api-xxxxxxxxxx-xxxxx         1/1     Running   0          5m
-mailhog-xxxxxxxxxx-xxxxx             1/1     Running   0          14m
-notifications-api-xxxxxxxxxx-xxxxx   1/1     Running   0          5m
-payments-api-xxxxxxxxxx-xxxxx        1/1     Running   0          5m
-postgres-xxxxxxxxxx-xxxxx            1/1     Running   0          7m
-rabbitmq-xxxxxxxxxx-xxxxx            1/1     Running   0          7m
-sqlserver-xxxxxxxxxx-xxxxx           1/1     Running   0          14m
+NAME                                 READY   STATUS      RESTARTS   AGE
+catalog-api-xxxxxxxxxx-xxxxx         1/1     Running     0          5m
+mailhog-xxxxxxxxxx-xxxxx             1/1     Running     0          10m
+notifications-api-xxxxxxxxxx-xxxxx   1/1     Running     0          5m
+payments-api-xxxxxxxxxx-xxxxx        1/1     Running     0          5m
+postgres-xxxxxxxxxx-xxxxx            1/1     Running     0          10m
+rabbitmq-xxxxxxxxxx-xxxxx            1/1     Running     0          10m
+sqlserver-xxxxxxxxxx-xxxxx           1/1     Running     0          10m
+sqlserver-users-xxxxxxxxxx-xxxxx     1/1     Running     0          10m
+user-api-xxxxxxxxxx-xxxxx            1/1     Running     0          5m
+user-api-migrate-xxxxx               0/1     Completed   0          5m
 ```
 
-Testando o fluxo de compra através do Service do Catalog (Payments e Notifications não expõem Service HTTP — eles só reagem a eventos do RabbitMQ):
+Testando os dois fluxos completos através dos Services do Catalog e do Users (Payments e Notifications não expõem Service HTTP — eles só reagem a eventos do RabbitMQ):
 
 ```bash
-kubectl port-forward -n fiapgames svc/catalog-api 8090:80
+kubectl port-forward -n fiapgames svc/catalog-api 8090:80 &
+kubectl port-forward -n fiapgames svc/user-api 8091:80 &
 
-# em outro terminal
+# cadastro -> e-mail de boas-vindas
+curl -X POST http://localhost:8091/api/users -H "Content-Type: application/json" \
+  -d '{"nome":"Joao K8s","email":"joao.k8s@example.com","password":"SenhaForte@123"}'
+
+# compra
 curl -X POST http://localhost:8090/games -H "Content-Type: application/json" \
-  -d '{"title":"Terraria","description":"Sandbox","price":19.90,"genre":"Sandbox"}'
+  -d '{"title":"Dark Souls III","description":"Souls-like","price":39.90,"genre":"RPG"}'
 
 curl -X POST http://localhost:8090/games/{gameId}/purchase -H "Content-Type: application/json" \
-  -d '{"userId":"44444444-4444-4444-4444-444444444444"}'
+  -d '{"userId":"{userId}"}'
 
 curl http://localhost:8090/orders/{orderId}
-curl http://localhost:8090/library/44444444-4444-4444-4444-444444444444
+
+# biblioteca — Catalog busca nome/e-mail reais no Users via RabbitMQ dentro do cluster
+curl http://localhost:8090/library/{userId}
 ```
 
-Isso foi validado de ponta a ponta: `payments-api` consome `OrderPlacedEvent` e processa o pagamento sozinho, `catalog-api` consome `PaymentProcessedEvent` e atualiza o pedido/biblioteca, `notifications-api` consome o mesmo evento e loga o e-mail — tudo dentro do cluster, sem simulação manual. Como o `users-api` ainda não está no cluster, `GET /library/{userId}` retorna `503` (timeout) nesse cenário — funciona normalmente assim que o Users também for integrado ao k8s.
+Validado de ponta a ponta dentro de um cluster Kind real: cadastro publicou `UserCreatedEvent` e o e-mail de boas-vindas chegou no Notifications; a compra foi `Approved` pelo Payments e a confirmação de compra também chegou por e-mail; e `GET /library/{userId}` retornou nome/e-mail reais do usuário (via `UserLookupRequested`/`Responded` no RabbitMQ) junto com o jogo comprado — tudo isso com os 4 microsserviços rodando como pods no mesmo cluster, sem nenhuma simulação manual de evento.
 
 Encerrar o cluster:
 
