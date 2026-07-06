@@ -127,9 +127,11 @@ kubectl apply -f ../Fiap.Games.Users/k8s/
 # 7. como as imagens não estão publicadas num registry real, force o cluster a usar
 #    a imagem carregada localmente em vez de tentar puxar do Docker Hub
 #    (o user-api.yaml e o migration-job.yaml do Users já vêm com imagePullPolicy: IfNotPresent, não precisam de patch)
-kubectl patch deployment catalog-api -n fiapgames -p '{"spec":{"template":{"spec":{"containers":[{"name":"catalog-api","imagePullPolicy":"IfNotPresent"}]}}}}'
-kubectl patch deployment payments-api -n fiapgames -p '{"spec":{"template":{"spec":{"containers":[{"name":"payments-api","imagePullPolicy":"IfNotPresent"}]}}}}'
-kubectl patch deployment notifications-api -n fiapgames -p '{"spec":{"template":{"spec":{"containers":[{"name":"notifications-api","imagePullPolicy":"IfNotPresent"}]}}}}'
+#    os patches ficam em arquivo (k8s/patches/) em vez de JSON inline porque aspas duplas
+#    dentro de aspas simples se perdem ao passar para o kubectl.exe no PowerShell
+kubectl patch deployment catalog-api -n fiapgames --patch-file k8s/patches/catalog-api-image-pull-policy.json
+kubectl patch deployment payments-api -n fiapgames --patch-file k8s/patches/payments-api-image-pull-policy.json
+kubectl patch deployment notifications-api -n fiapgames --patch-file k8s/patches/notifications-api-image-pull-policy.json
 
 kubectl get pods -n fiapgames
 ```
