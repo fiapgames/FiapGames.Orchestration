@@ -154,6 +154,36 @@ user-api-xxxxxxxxxx-xxxxx            1/1     Running     0          5m
 user-api-migrate-xxxxx               0/1     Completed   0          5m
 ```
 
+### Acompanhando os logs em tempo real
+
+`kubectl logs -f` funciona pra um pod só. Pra ver todos os pods do namespace juntos (com cor por pod), use o [`stern`](https://github.com/stern/stern):
+
+```bash
+stern -n fiapgames ".*"
+```
+
+Instalação (escolha conforme seu SO):
+
+```bash
+# Windows (winget)
+winget install stern.stern
+
+# macOS (Homebrew)
+brew install stern
+
+# Linux/macOS (Go, requer Go instalado)
+go install github.com/stern/stern@latest
+```
+
+Ou baixe o binário direto em [github.com/stern/stern/releases](https://github.com/stern/stern/releases). No Windows, depois de instalar via winget pode ser necessário abrir um **novo** terminal (o PATH só é lido quando o processo inicia).
+
+Filtrar por serviço específico (regex contra o nome do pod) ou por texto no log:
+
+```bash
+stern -n fiapgames catalog-api
+stern -n fiapgames ".*" --include "error|Error|Exception"
+```
+
 Testando os dois fluxos completos através dos Services do Catalog e do Users (Payments e Notifications não expõem Service HTTP — eles só reagem a eventos do RabbitMQ):
 
 ```bash
