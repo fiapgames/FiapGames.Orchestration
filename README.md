@@ -101,6 +101,10 @@ Nenhum repositório de microsserviço traz manifesto de Deployment/Service para 
 kind create cluster --name fiapgames
 
 # 2. sobe a infraestrutura compartilhada (namespace + rabbitmq + postgres + sqlserver + mailhog)
+#    namespace.yaml precisa ir primeiro e separado: "kubectl apply -f k8s/" aplica os arquivos
+#    em ordem alfabética, e "mailhog.yaml" vem antes de "namespace.yaml" nessa ordem — sem esse
+#    apply em separado, ele falha com "namespaces \"fiapgames\" not found"
+kubectl apply -f k8s/namespace.yaml
 kubectl apply -f k8s/
 
 # 3. builda as imagens das APIs (via docker compose, reaproveitando os Dockerfiles dos repositórios irmãos)
@@ -136,6 +140,14 @@ kubectl patch deployment notifications-api -n fiapgames --patch-file k8s/patches
 kubectl get pods -n fiapgames
 ```
 
+O `Service` do Catalog e do Users é `ClusterIP` — sem port-forward, `localhost:8090`/`8091` (as portas que o `.env` do front espera) não têm pra onde apontar. `Start-Process ... -WindowStyle Hidden` desacopla os dois processos do terminal que os iniciou (fechar o terminal não os mata — só reiniciar o PC/Docker Desktop, ou o pod correspondente reiniciar, derruba o forward):
+
+```powershell
+# 8. expõe catalog-api (8090) e user-api (8091) em localhost
+Start-Process kubectl -ArgumentList 'port-forward -n fiapgames svc/catalog-api 8090:80' -WindowStyle Hidden
+Start-Process kubectl -ArgumentList 'port-forward -n fiapgames svc/user-api 8091:80' -WindowStyle Hidden
+```
+
 > O passo 7 (`imagePullPolicy: IfNotPresent`) só é necessário para teste local com Kind, porque as imagens não foram publicadas de verdade no Docker Hub ainda. Depois que as imagens forem publicadas (`docker push`) e os manifestos apontarem para um registry real, isso deixa de ser necessário — o comportamento padrão (`imagePullPolicy: Always` para tag `latest`) volta a ser o correto.
 
 **Resultado esperado** — todos os 9 pods `1/1 Running` + o Job de migration do Users `Completed`:
@@ -163,7 +175,7 @@ stern -n fiapgames ".*"
 ```
 
 Instalação (escolha conforme seu SO):
-
+-
 ```bash
 # Windows (winget)
 winget install stern.stern
@@ -186,9 +198,8 @@ stern -n fiapgames ".*" --include "error|Error|Exception"
 
 Testando os dois fluxos completos através dos Services do Catalog e do Users (Payments e Notifications não expõem Service HTTP — eles só reagem a eventos do RabbitMQ):
 
-```bash
-kubectl port-forward -n fiapgames svc/catalog-api 8090:80 &
-kubectl port-forward -n fiapgames svc/user-api 8091:80 &
+```bash 
+&
 
 # cadastro -> e-mail de boas-vindas
 curl -X POST http://localhost:8091/api/users -H "Content-Type: application/json" \
