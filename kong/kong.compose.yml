@@ -1,0 +1,227 @@
+# Configuração declarativa do API Gateway (Kong) — ambiente DOCKER COMPOSE.
+#
+# IDÊNTICO ao kong.k8s.yml (que é o canônico) exceto pelas linhas "url:": no
+# compose os serviços resolvem pelo nome do container na porta 8080, no cluster
+# resolvem pelo FQDN do Service na porta 80. Um `diff` entre os dois arquivos
+# deve mostrar SOMENTE essas linhas.
+#
+#   diff kong/kong.k8s.yml kong/kong.compose.yml
+#
+# Mudou uma rota ou política? Mude nos DOIS. O Kong não interpola variáveis de
+# ambiente em config declarativa, então não há como unificar sem uma etapa de
+# template (envsubst ou imagem custom).
+#
+# Como é carregado: o serviço `kong-bootstrap` do docker-compose.yml roda
+# `kong config db_import` com este arquivo.
+#
+# Validar sem subir nada:
+#   docker run --rm -e KONG_DATABASE=off -v "${PWD}/kong:/cfg" kong:3.9 kong config parse /cfg/kong.compose.yml
+#
+# O KONG_DATABASE=off não é opcional aqui: sem ele o CLI assume o default
+# `postgres` e tenta conectar num banco antes de validar o arquivo, falhando com
+# "failed to retrieve PostgreSQL server_version_num: connection refused".
+
+_format_version: "3.0"
+
+services:
+  # ---------------------------------------------------------------------------
+  # UsersAPI — emite e valida o JWT. Base de rota: /api/users
+  # ---------------------------------------------------------------------------
+  - name: user-api
+    url: http://users-api:8080
+    routes:
+      # --- Públicas: são elas que criam a conta e emitem o token. Protegê-las
+      #     tornaria impossível obter um token (galinha e ovo).
+      - name: users-register
+        paths: ["/api/users"]
+        methods: ["POST"]
+        strip_path: false
+
+      # Casa também /api/users (prefixo), mas o Kong prioriza o path mais longo,
+      # então POST /api/users/login cai aqui. Ambas são públicas de qualquer forma.
+      - name: users-login
+        paths: ["/api/users/login"]
+        methods: ["POST"]
+        strip_path: false
+
+      - name: users-refresh
+        paths: ["/api/users/refresh"]
+        methods: ["POST"]
+        strip_path: false
+
+      # --- Preflight CORS. NÃO é opcional.
+      # Antes de qualquer POST/GET cross-origin o navegador manda um OPTIONS sem
+      # header Authorization. Como todas as rotas acima restringem `methods`, um
+      # OPTIONS não casava com nenhuma e o Kong respondia 404 "no Route matched" —
+      # o que bloqueava o LOGIN do front antes da requisição real sair.
+      # O prefixo /api/users cobre o preflight de /login, /refresh, / e /{id}.
+      # Sem plugin jwt: o preflight não carrega credencial nem dado por definição,
+      # e é a app que responde os headers Access-Control-*.
+      - name: users-preflight
+        paths: ["/api/users"]
+        methods: ["OPTIONS"]
+        strip_path: false
+
+      # --- Protegida: GET /api/users e GET /api/users/{id}
+      - name: users-read
+        paths: ["/api/users"]
+        methods: ["GET"]
+        strip_path: false
+        plugins:
+          - name: jwt
+            config:
+              # O plugin casa o token com a credencial pelo claim `iss`.
+              key_claim_name: iss
+              # SEM isto, token expirado passa: claims_to_verify não tem default.
+              claims_to_verify: ["exp"]
+              # SEM isto (default true), o preflight CORS OPTIONS do navegador
+              # levaria 401 e todas as chamadas do front quebrariam.
+              run_on_preflight: false
+
+  # ---------------------------------------------------------------------------
+  # CatalogAPI — não tem autenticação nenhuma no código. O gateway é o ÚNICO
+  # ponto de enforcement. O plugin fica no nível do service, cobrindo todas as
+  # rotas abaixo sem repetição.
+  # ---------------------------------------------------------------------------
+  - name: catalog-api
+    url: http://catalog-api:8080
+    plugins:
+      - name: jwt
+        config:
+          key_claim_name: iss
+          claims_to_verify: ["exp"]
+          run_on_preflight: false
+    routes:
+      - name: catalog-games
+        paths: ["/games"]
+        strip_path: false
+
+      - name: catalog-orders
+        paths: ["/orders"]
+        strip_path: false
+
+      - name: catalog-library
+        paths: ["/library"]
+        strip_path: false
+
+  # ---------------------------------------------------------------------------
+  # Mesmo upstream do catalog-api, mas SEM o plugin jwt. Existe só para deixar
+  # /health público: o HealthBadge do FiapGames.Web bate nele sem token, e
+  # exigir JWT num health check quebraria a tela sem ganho de segurança.
+  # Um service separado evita repetir o bloco do plugin em cada rota protegida.
+  # ---------------------------------------------------------------------------
+  - name: catalog-api-public
+    url: http://catalog-api:8080
+    routes:
+      # OPTIONS junto do GET pelo mesmo motivo da rota users-preflight: o
+      # httpClient.ts do front manda Content-Type: application/json em TODO
+      # request, inclusive GET, e esse header não é CORS-safelisted — então o
+      # navegador dispara preflight até para o health check.
+      - name: catalog-health
+        paths: ["/health"]
+        methods: ["GET", "OPTIONS"]
+        strip_path: false
+
+# -----------------------------------------------------------------------------
+# Credencial JWT. `key` TEM que ser igual ao claim `iss` que o UsersAPI emite
+# (Jwt__Issuer), e `secret` são os bytes UTF-8 crus da chave de assinatura
+# (Jwt__SecretKey) — o .NET usa Encoding.UTF8.GetBytes e o Kong trata igual,
+# sem decodificar base64.
+#
+# O segredo vai literal aqui porque o Kong Vault não funciona para os atributos
+# do plugin JWT. É a mesma chave de desenvolvimento já presente no
+# docker-compose.yml (users-api -> Jwt__SecretKey).
+# -----------------------------------------------------------------------------
+consumers:
+  - username: fiapgames-users-api
+    jwt_secrets:
+      # O `id` fixo NÃO é decoração: sem ele o `kong config db_import` não é
+      # idempotente. Services, routes e consumers têm chave natural (`name`,
+      # `username`) e são atualizados no lugar, mas uma credencial jwt não tem —
+      # o Kong geraria um UUID novo a cada import e a segunda execução morreria
+      # com "UNIQUE violation detected on '{key=\"User.Games.Fiap\"}'".
+      # Com o id explícito, reimportar atualiza a mesma linha.
+      - id: fc900000-0000-4000-8000-000000000001
+        key: "User.Games.Fiap"
+        algorithm: HS256
+        secret: "dev-only-change-this-secret-key-32-bytes-minimum"
+
+# -----------------------------------------------------------------------------
+# Políticas globais — valem para todas as rotas.
+# -----------------------------------------------------------------------------
+plugins:
+  # Injeta um id único por requisição. Permite seguir uma compra pelos logs dos
+  # 4 microsserviços e prepara o terreno para traces distribuídos.
+  - name: correlation-id
+    config:
+      header_name: X-Correlation-ID
+      generator: "uuid#counter"
+      echo_downstream: true
+
+  # `policy: local` é o que funciona sem banco de cache externo.
+  # `limit_by: ip` é OBRIGATÓRIO ser explícito: o default é `consumer`, e como
+  # existe um único jwt_secret, TODOS os usuários logados viram o mesmo consumer
+  # — o limite seria um balde global compartilhado em vez de por cliente.
+  - name: rate-limiting
+    config:
+      minute: 100
+      policy: local
+      limit_by: ip
+
+  # Expõe métricas em :8100/metrics (latência, contagem por status, erros).
+  # É a FONTE das métricas; o destino pode ser Grafana ou New Relic — veja
+  # kong/NEWRELIC.md.
+  - name: prometheus
+    config:
+      status_code_metrics: true
+      latency_metrics: true
+
+  # ---------------------------------------------------------------------------
+  # NEW RELIC — item 3 do Tech Challenge (Observabilidade). DESLIGADO.
+  #
+  # Para ligar: descomente os dois blocos, troque <NEW_RELIC_LICENSE_KEY> pela
+  # chave real, recarregue o seed e reinicie o Kong. Guia: kong/NEWRELIC.md
+  #
+  # Ficam comentados em vez de apontar para um placeholder porque, ativos com
+  # endpoint/chave inválidos, empilhariam erro de envio a cada requisição.
+  #
+  # Por que dois plugins e não só o opentelemetry: exportar LOGS e MÉTRICAS por
+  # OTLP só existe a partir da versão 3.13 do plugin, que é Kong Enterprise. No
+  # Kong OSS 3.9 o opentelemetry faz apenas TRACES — os logs vão pelo http-log e
+  # as métricas pelo plugin prometheus acima.
+  #
+  # Conta na região EU: troque log-api.newrelic.com -> log-api.eu.newrelic.com
+  #                     e     otlp.nr-data.net      -> otlp.eu01.nr-data.net
+  # ---------------------------------------------------------------------------
+
+  # LOGS — manda o log de acesso (status, rota, service, latências, consumer)
+  # direto para a Log API. Atenção ao header `Api-Key` com A maiúsculo: o OTLP
+  # abaixo usa `api-key` minúsculo. São APIs diferentes, com grafias diferentes.
+  # O placeholder <NEW_RELIC_LICENSE_KEY> é substituído pela chave real em tempo
+  # de bootstrap (docker-compose.yml, serviço kong-bootstrap) via `sed`, a partir
+  # do NEW_RELIC_LICENSE_KEY do .env — a chave real NUNCA fica escrita neste
+  # arquivo versionado. Ver kong/NEWRELIC.md.
+  - name: http-log
+    config:
+      http_endpoint: "https://log-api.newrelic.com/log/v1"
+      method: POST
+      content_type: "application/json"
+      headers:
+        Api-Key: "<NEW_RELIC_LICENSE_KEY>"
+      queue:
+        max_batch_size: 50        # a Log API recusa POST acima de 1 MB
+        max_coalescing_delay: 5
+
+  # TRACES — só isto não basta: exige KONG_TRACING_INSTRUMENTATIONS=all e
+  # KONG_TRACING_SAMPLING_RATE=1.0 no serviço kong do docker-compose.yml.
+  # Sem essas variáveis o plugin sobe e não gera span nenhum.
+  - name: opentelemetry
+    config:
+      traces_endpoint: "https://otlp.nr-data.net:4318/v1/traces"
+      headers:
+        api-key: "<NEW_RELIC_LICENSE_KEY>"
+      resource_attributes:
+        service.name: "fiapgames-kong-gateway"
+      propagation:
+        default_format: w3c       # o agente .NET consome traceparent W3C,
+                                  # é o que costura o trace da Compra de Jogo

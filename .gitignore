@@ -1,0 +1,10 @@
+# Credenciais reais. O template versionado é o .env.example.
+# É aqui que fica a license key da New Relic — nunca commitar.
+.env
+.env.local
+
+# Visual Studio (pasta-como-solução)
+.vs/
+
+# Logs soltos
+*.log

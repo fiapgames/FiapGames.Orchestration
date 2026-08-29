@@ -1,0 +1,144 @@
+# The API Gateway itself — the single entry point for the whole FiapGames system.
+#
+# Runs in DB mode (see 01-kong-bootstrap-job.yaml for why) and serves four ports:
+#   8000  proxy         -> the only port clients should ever use
+#   8001  Admin API     -> published on the host because Kong Manager needs it
+#   8002  Kong Manager  -> official OSS admin GUI, bundled in this same image
+#   8100  status        -> health probes + Prometheus /metrics
+#
+# Routes, JWT validation and policies are NOT defined here — they live in
+# kong/kong.k8s.yml and are loaded by the bootstrap Job.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kong
+  namespace: fiapgames
+  labels:
+    app: kong
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kong
+  template:
+    metadata:
+      labels:
+        app: kong
+    spec:
+      initContainers:
+        # Same wait pattern the microservice manifests use for their databases.
+        # Note this only waits for the port, not for the migrations: if Kong starts
+        # before the bootstrap Job finished, it exits with a schema error and
+        # Kubernetes restarts it until the Job is done. That settles in seconds.
+        - name: wait-for-postgres-kong
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z -w 2 postgres-kong.fiapgames.svc.cluster.local 5432; do
+                echo "waiting for postgres-kong..."
+                sleep 2
+              done
+      containers:
+        - name: kong
+          image: kong:3.9
+          envFrom:
+            - configMapRef:
+                name: kong-db-config
+          env:
+            - name: KONG_PROXY_LISTEN
+              value: "0.0.0.0:8000"
+            - name: KONG_ADMIN_LISTEN
+              value: "0.0.0.0:8001"
+            # Kong Manager Open Source — bundled since Kong 3.4, no extra
+            # container and no database of its own.
+            - name: KONG_ADMIN_GUI_LISTEN
+              value: "0.0.0.0:8002"
+            - name: KONG_ADMIN_GUI_URL
+              value: "http://localhost:8002"
+            # Required: Kong Manager runs IN THE BROWSER and calls the Admin API
+            # from there, so it needs the address as seen from the host — not the
+            # in-cluster one. Without this the UI loads but shows nothing.
+            - name: KONG_ADMIN_GUI_API_URL
+              value: "http://localhost:8001"
+            - name: KONG_STATUS_LISTEN
+              value: "0.0.0.0:8100"
+            - name: KONG_PROXY_ACCESS_LOG
+              value: "/dev/stdout"
+            - name: KONG_PROXY_ERROR_LOG
+              value: "/dev/stderr"
+            - name: KONG_ADMIN_ACCESS_LOG
+              value: "/dev/stdout"
+            - name: KONG_ADMIN_ERROR_LOG
+              value: "/dev/stderr"
+            - name: KONG_NGINX_WORKER_PROCESSES
+              value: "1"
+            # Tracing — needed by the opentelemetry plugin, which is commented out
+            # in kong/kong.k8s.yml until a New Relic license key exists. `off` is
+            # Kong's default and keeps current behaviour: with the plugin enabled
+            # but these unset, no span is ever produced. Flip to "all" / "1.0" when
+            # switching observability on (see kong/NEWRELIC.md).
+            - name: KONG_TRACING_INSTRUMENTATIONS
+              value: "off"
+            - name: KONG_TRACING_SAMPLING_RATE
+              value: "0"
+          ports:
+            - name: proxy
+              containerPort: 8000
+            - name: admin
+              containerPort: 8001
+            - name: manager
+              containerPort: 8002
+            - name: status
+              containerPort: 8100
+          readinessProbe:
+            httpGet:
+              path: /status
+              port: 8100
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /status
+              port: 8100
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+---
+# NodePorts must match the extraPortMappings in kind-config.yaml (repo root), otherwise
+# nothing is reachable from the host.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kong
+  namespace: fiapgames
+  labels:
+    app: kong
+spec:
+  type: NodePort
+  selector:
+    app: kong
+  ports:
+    - name: proxy
+      port: 8000
+      targetPort: 8000
+      nodePort: 30000
+    - name: admin
+      port: 8001
+      targetPort: 8001
+      nodePort: 30001
+    - name: manager
+      port: 8002
+      targetPort: 8002
+      nodePort: 30002
+    - name: status
+      port: 8100
+      targetPort: 8100
+      nodePort: 30100

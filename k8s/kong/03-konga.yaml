@@ -1,0 +1,147 @@
+# Konga — community admin GUI for the Kong Admin API, on http://localhost:1337
+#
+# Heads up: Konga is ARCHIVED upstream (github.com/pantsel/konga, archived, 362 open
+# issues, last push Apr 2024) and its official Kong support stops at 2.x. It is here
+# because the course material calls for it. If a screen misbehaves against Kong 3.x,
+# Kong Manager on http://localhost:8002 covers the same ground and is maintained.
+#
+# Two important constraints this design respects:
+#   - Konga needs the OLD Postgres (11.16) in postgres-kong.yaml. Its sails-postgresql
+#     driver breaks on modern Postgres, which is why it does not share the repo's
+#     existing postgres:16 instance.
+#   - Konga talks to the Admin API from its SERVER, not the browser, so the in-cluster
+#     address works: http://kong.fiapgames.svc.cluster.local:8001
+#
+# First run: open the UI, create the admin user on the signup screen, then add a
+# Connection pointing at http://kong.fiapgames.svc.cluster.local:8001
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: konga-prepare
+  namespace: fiapgames
+  labels:
+    app: konga-prepare
+spec:
+  backoffLimit: 4
+  template:
+    metadata:
+      # Deliberately NOT `app: konga` — that is the selector of the konga Service,
+      # so this short-lived pod would be picked up as an endpoint while it runs.
+      labels:
+        app: konga-prepare
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        - name: wait-for-postgres-kong
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z -w 2 postgres-kong.fiapgames.svc.cluster.local 5432; do
+                echo "waiting for postgres-kong..."
+                sleep 2
+              done
+      containers:
+        - name: konga-prepare
+          image: pantsel/konga:latest
+          # Creates Konga's own tables in the `konga` database, which the
+          # postgres-kong init script created on first startup.
+          args:
+            - "-c"
+            - "prepare"
+            - "-a"
+            - "postgres"
+            - "-u"
+            - "postgresql://kong:kong@postgres-kong.fiapgames.svc.cluster.local:5432/konga"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: konga
+  namespace: fiapgames
+  labels:
+    app: konga
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: konga
+  template:
+    metadata:
+      labels:
+        app: konga
+    spec:
+      initContainers:
+        - name: wait-for-postgres-kong
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z -w 2 postgres-kong.fiapgames.svc.cluster.local 5432; do
+                echo "waiting for postgres-kong..."
+                sleep 2
+              done
+      containers:
+        - name: konga
+          image: pantsel/konga:latest
+          env:
+            - name: DB_ADAPTER
+              value: "postgres"
+            - name: DB_HOST
+              value: "postgres-kong.fiapgames.svc.cluster.local"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_DATABASE
+              value: "konga"
+            - name: DB_USER
+              value: "kong"
+            - name: DB_PASSWORD
+              value: "kong"
+            - name: NODE_ENV
+              value: "production"
+            # Signs Konga's own session tokens (its login is separate from the
+            # JWT the gateway validates). Local-only throwaway value.
+            - name: TOKEN_SECRET
+              value: "konga"
+          ports:
+            - name: http
+              containerPort: 1337
+          # TCP probes rather than httpGet: Konga's root path redirects, and it
+          # takes a while to boot on first run.
+          readinessProbe:
+            tcpSocket:
+              port: 1337
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 1337
+            initialDelaySeconds: 60
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: konga
+  namespace: fiapgames
+  labels:
+    app: konga
+spec:
+  type: NodePort
+  selector:
+    app: konga
+  ports:
+    - name: http
+      port: 1337
+      targetPort: 1337
+      # Must match the extraPortMapping in kind-config.yaml (repo root)
+      nodePort: 31337
