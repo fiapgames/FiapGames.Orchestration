@@ -49,30 +49,6 @@ services:
     volumes:
       - postgres-payments-data:/var/lib/postgresql/data
 
-  postgres-notifications:
-    image: postgres:16
-    container_name: fiapgames-notifications-postgres
-    environment:
-      POSTGRES_USER: fiapgames-admin
-      POSTGRES_PASSWORD: FiapGames@Admin123
-      POSTGRES_DB: fiapgames-notifications
-    ports:
-      - "5433:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U fiapgames-admin -d fiapgames-notifications"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    volumes:
-      - postgres-notifications-data:/var/lib/postgresql/data
-
-  mailhog:
-    image: mailhog/mailhog:latest
-    container_name: fiapgames-mailhog
-    ports:
-      - "1025:1025"
-      - "8025:8025"
-
   sqlserver-users:
     image: mcr.microsoft.com/mssql/server:2022-latest
     container_name: fiapgames-users-sqlserver
@@ -126,30 +102,11 @@ services:
       RabbitMq__VirtualHost: "/"
       RabbitMq__UserName: fiapgames-admin
       RabbitMq__Password: FiapGames@Admin123
+      Notifications__BaseUrl: "https://fiap-games-notification-hdaza0g6fudjc3ak.westus3-01.azurewebsites.net"
+      Notifications__FunctionKey: "${NOTIFICATIONS_FUNCTION_KEY}"
 
-  notifications-api:
-    build:
-      context: ../FiapGames.Notifications
-      dockerfile: Dockerfile
-    container_name: fiapgames-notifications
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      postgres-notifications:
-        condition: service_healthy
-      mailhog:
-        condition: service_started
-    ports:
-      - "8082:8080"
-    environment:
-      ConnectionStrings__Postgres: "Host=postgres-notifications;Port=5432;Database=fiapgames-notifications;Username=fiapgames-admin;Password=FiapGames@Admin123"
-      RabbitMq__Host: rabbitmq
-      RabbitMq__VirtualHost: "/"
-      RabbitMq__UserName: fiapgames-admin
-      RabbitMq__Password: FiapGames@Admin123
-      Smtp__Host: mailhog
-      Smtp__Port: 1025
-      Smtp__From: noreply@fiapgames.local
+  # O microsserviço de notificações virou serverless (Azure Functions) e não roda
+  # mais localmente. Users e Payments o alcançam pelas variáveis Notifications__*.
 
   users-api:
     build:
@@ -172,10 +129,11 @@ services:
       RabbitMq__Password: FiapGames@Admin123
       Jwt__SecretKey: "dev-only-change-this-secret-key-32-bytes-minimum"
       Database__MigrateOnStartup: "true"
+      Notifications__BaseUrl: "https://fiap-games-notification-hdaza0g6fudjc3ak.westus3-01.azurewebsites.net"
+      Notifications__FunctionKey: "${NOTIFICATIONS_FUNCTION_KEY}"
 
 volumes:
   rabbitmq-data:
   sqlserver-catalog-data:
   postgres-payments-data:
-  postgres-notifications-data:
   sqlserver-users-data:

@@ -1,0 +1,6 @@
+# Variáveis de ambiente locais (contém a chave da Azure Function de notificações)
+.env
+.env.*
+!.env.example
+
+.DS_Store
