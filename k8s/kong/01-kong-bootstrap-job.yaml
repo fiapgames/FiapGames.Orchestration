@@ -88,9 +88,20 @@ spec:
           # docker-compose equivalent proved `kong migrations`/`config db_import`
           # work fine invoked directly, without that wrapper script.
           command: ["/bin/sh", "-c"]
+          # `:-license-key-not-configured` is NOT decoration. Measured directly: with
+          # the `newrelic` Secret absent (the out-of-the-box state), the env var below
+          # is unset, a bare `${NEW_RELIC_LICENSE_KEY}` substitutes an EMPTY string,
+          # and `kong config db_import` then fails Kong's own plugin schema validation
+          # — `http-log`/`opentelemetry`'s `headers` field requires each value to be
+          # at least 1 character. That is not a soft failure of those two plugins: it
+          # aborts the WHOLE import, so no service, route, or JWT plugin loads either —
+          # the entire gateway stays unconfigured. A non-empty fallback keeps the
+          # placeholder replaced with garbage (New Relic still rejects it with
+          # 401/403 at runtime) instead of blank, so the schema is satisfied and
+          # routing/JWT/rate-limiting load normally regardless of New Relic being set up.
           args:
             - |
-              sed "s|<NEW_RELIC_LICENSE_KEY>|${NEW_RELIC_LICENSE_KEY}|g" \
+              sed "s|<NEW_RELIC_LICENSE_KEY>|${NEW_RELIC_LICENSE_KEY:-license-key-not-configured}|g" \
                 /kong/declarative/kong.yml.template > /tmp/kong.yml
               kong config db_import /tmp/kong.yml
           envFrom:

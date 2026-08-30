@@ -234,8 +234,7 @@ services:
       KONG_PG_PASSWORD: kong
       # Usada só pelo `sed` abaixo, para substituir o placeholder <NEW_RELIC_LICENSE_KEY>
       # dentro do container. kong/kong.compose.yml (o arquivo no disco/git) nunca é
-      # reescrito — a chave real não fica versionada. Vazio por padrão (observabilidade
-      # desligada): o sed troca o placeholder por uma string vazia, sem quebrar nada.
+      # reescrito — a chave real não fica versionada.
       NEW_RELIC_LICENSE_KEY: "${NEW_RELIC_LICENSE_KEY:-}"
     volumes:
       # Montado como .template — o arquivo real, com o placeholder substituído, vai
@@ -246,11 +245,23 @@ services:
     # o Compose quebrar a string em palavras e rodar apenas `kong`, que imprime o help.
     # "$$" (escapado) é necessário: sem isso o PRÓPRIO Compose tentaria interpolar
     # $NEW_RELIC_LICENSE_KEY ao ler este arquivo, antes mesmo do container existir.
+    #
+    # `:-license-key-not-configured` NÃO é decoração. Medido diretamente: sem chave
+    # configurada (o .env.example de fábrica tem NEW_RELIC_LICENSE_KEY vazio), a
+    # substituição vira uma string VAZIA, e `kong config db_import` falha a validação
+    # de schema do próprio Kong — o campo `headers` do `http-log`/`opentelemetry`
+    # exige valor com pelo menos 1 caractere. Isso não é uma falha isolada desses
+    # dois plugins: ela aborta o import inteiro, e nenhum service/route/plugin de
+    # JWT carrega — o gateway inteiro fica sem configuração nenhuma. Um fallback
+    # não-vazio mantém o placeholder substituído por lixo (a New Relic ainda
+    # rejeita com 401/403 em runtime) em vez de vazio, satisfazendo o schema e
+    # deixando roteamento/JWT/rate-limiting carregarem normalmente mesmo sem a
+    # New Relic configurada.
     entrypoint:
       - /bin/sh
       - -c
       - >-
-        sed "s|<NEW_RELIC_LICENSE_KEY>|$${NEW_RELIC_LICENSE_KEY}|g"
+        sed "s|<NEW_RELIC_LICENSE_KEY>|$${NEW_RELIC_LICENSE_KEY:-license-key-not-configured}|g"
         /kong/kong.yml.template > /tmp/kong.yml &&
         kong migrations bootstrap &&
         kong config db_import /tmp/kong.yml
@@ -332,6 +343,65 @@ services:
       NODE_ENV: production
       # Assina as sessões do próprio Konga (login dele, não o JWT do gateway).
       TOKEN_SECRET: konga
+
+  # Registra o admin da Konga (credenciais fixas de dev) e cria automaticamente
+  # a Connection apontando para o Kong local — sem isso, seria preciso abrir
+  # http://localhost:1337, cadastrar o usuário manualmente e clicar para ativar
+  # a connection toda vez que o volume for recriado.
+  #
+  # Descoberto testando ao vivo (nada disso está documentado no projeto Konga,
+  # que está arquivado): (1) POST /register é idempotente na prática — se já
+  # existe um admin, apenas re-renderiza a página com "already registered" e
+  # HTTP 200, não falha o container. (2) A Connection não tem endpoint HTTP
+  # simples de criação, vive só na tabela konga_kong_nodes — inserida via SQL.
+  # (3) A connection "ativa" para um usuário NÃO é konga_kong_nodes.active —
+  # é o campo konga_users.node (FK), lido do login e cacheado no localStorage
+  # do navegador. Sem setá-lo, o menu "API GATEWAY" fica escondido mesmo com
+  # uma Connection já existindo, e quem já estava logado só vê a mudança após
+  # deslogar e logar de novo.
+  konga-register:
+    image: busybox:1.36
+    container_name: fiapgames-konga-register
+    depends_on:
+      konga:
+        condition: service_started
+    # Credenciais de dev fixas — mesma convenção já usada no resto do projeto
+    # (RabbitMQ/Postgres/SQL Server). Login próprio da Konga, sem relação
+    # nenhuma com o JWT do gateway.
+    entrypoint:
+      - sh
+      - -c
+      - |
+        until wget -q --spider http://konga:1337; do
+          echo "waiting for konga..."
+          sleep 2
+        done
+        wget -q -O /dev/null --header 'Content-Type: application/json' \
+          --post-data '{"username":"admin","email":"admin@fiapgames.local","password":"FiapGames@Admin123","password_confirmation":"FiapGames@Admin123"}' \
+          http://konga:1337/register || true
+    restart: on-failure
+
+  konga-connect:
+    image: postgres:11.16
+    container_name: fiapgames-konga-connect
+    depends_on:
+      konga-register:
+        condition: service_completed_successfully
+    environment:
+      PGPASSWORD: kong
+    entrypoint:
+      - sh
+      - -c
+      - |
+        psql -h postgres-kong -U kong -d konga -v ON_ERROR_STOP=1 -c "
+          INSERT INTO konga_kong_nodes (name, kong_admin_url, kong_api_key, kong_version, active, health_checks, \"createdAt\", \"updatedAt\")
+          SELECT 'fiapgames', 'http://kong:8001', '', '3.0.0', true, false, now(), now()
+          WHERE NOT EXISTS (SELECT 1 FROM konga_kong_nodes);
+
+          UPDATE konga_users SET node = (SELECT id FROM konga_kong_nodes ORDER BY id LIMIT 1)
+          WHERE admin = true AND node IS NULL;
+        "
+    restart: on-failure
 
 volumes:
   rabbitmq-data:

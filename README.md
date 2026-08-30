@@ -34,14 +34,15 @@ FiapGames.Orchestration/
     ├── rabbitmq.yaml           \
     ├── postgres.yaml            |  infraestrutura compartilhada
     ├── sqlserver.yaml           |  (os repos dos microsserviços não trazem isso)
-    ├── sqlserver-users.yaml     |
-    ├── mailhog.yaml            /
+    ├── sqlserver-users.yaml     /
+    ├── payments-api-service.yaml   Service do Payments (o repo dele só traz Deployment)
     ├── postgres-kong.yaml      banco PRÓPRIO do gateway (postgres:11.16)
     ├── kong/                   manifestos do gateway (prefixo numérico = ordem de apply)
     │   ├── 00-kong-db-config.yaml
     │   ├── 01-kong-bootstrap-job.yaml
     │   ├── 02-kong.yaml
-    │   └── 03-konga.yaml
+    │   ├── 03-konga.yaml
+    │   └── 04-konga-connect.yaml    login + Connection automáticos (ver Konga acima)
     └── patches/                patches aplicados nos Deployments dos repos irmãos
         ├── *-image-pull-policy.json    imagePullPolicy para teste local com Kind
         └── *-newrelic.json             agente APM (só ao ligar observabilidade)
@@ -83,6 +84,7 @@ Roteamento **passthrough**: os paths originais de cada serviço são preservados
 | `catalog-games` | todos | `/games`, `/games/{id}`, `/games/{id}/purchase` | catalog-api | exigido |
 | `catalog-orders` | todos | `/orders`, `/orders/{id}` | catalog-api | exigido |
 | `catalog-library` | todos | `/library/{userId}` | catalog-api | exigido |
+| `payments-health` | `GET`, `OPTIONS` | `/payments/health` | payments-api | **público** (health check) |
 
 A rota `users-preflight` e o `OPTIONS` em `catalog-health` existem porque as demais rotas do Users restringem `methods` — sem elas o preflight do navegador tomava 404 e o **login do front não funcionava**. Detalhes em [CORS e o preflight](#cors-e-o-preflight--a-parte-mais-fácil-de-errar).
 
@@ -94,7 +96,7 @@ As três rotas de `POST /api/users*` são públicas por necessidade: são elas q
 |---|---|---|
 | `jwt` | `claims_to_verify: [exp]`, `run_on_preflight: false` | valida assinatura e expiração |
 | `rate-limiting` | 100/min, `policy: local`, `limit_by: ip` | protege o tráfego |
-| `correlation-id` | `X-Correlation-ID`, ecoado na resposta | rastrear uma compra pelos 4 serviços |
+| `correlation-id` | `X-Correlation-ID`, ecoado na resposta | rastrear uma compra pelos 3 serviços locais |
 | `prometheus` | em `:8100/metrics` | base da observabilidade (item 3) |
 
 ### Como o JWT é validado
@@ -172,9 +174,21 @@ A versão **11.16 é fixada de propósito e não deve ser atualizada**: o Konga 
 ### Duas UIs de administração
 
 - **Kong Manager** (`http://localhost:8002`) — GUI **oficial**, embutida na própria imagem `kong:3.4+`, sem container nem banco extra. Mantida pela Kong.
-- **Konga** (`http://localhost:1337`) — GUI da comunidade. No primeiro acesso, criar o usuário admin na tela e cadastrar uma *Connection* apontando para `http://kong:8001` (compose) ou `http://kong.fiapgames.svc.cluster.local:8001` (Kubernetes).
+- **Konga** (`http://localhost:1337`) — GUI da comunidade. **Login e Connection são automáticos** (serviços `konga-register`/`konga-connect` no compose, Job `konga-connect` no k8s — ver abaixo). Entre com:
+  - **usuário:** `admin`
+  - **senha:** `FiapGames@Admin123`
 
 > O Konga está **arquivado** upstream e seu suporte oficial vai até o Kong 2.x — a imagem `pantsel/konga:latest` é de **maio de 2020**. Está aqui porque a aula pede. Se alguma tela quebrar com o Kong 3.x, há dois caminhos: trocar a tag para `pantsel/konga:next` (build da branch de desenvolvimento, um pouco mais nova) ou simplesmente usar o Kong Manager, que cobre a mesma função e é mantido.
+
+#### Por que o login/Connection da Konga são automáticos
+
+Nada disso está documentado no projeto Konga (arquivado), foi descoberto testando ao vivo:
+
+1. **`POST /register` cria o admin.** É idempotente na prática, mas com uma pegadinha: Konga permite **um único admin no sistema inteiro** — a checagem é `count(admin=true) > 0`, não "esse username já existe". Então, se você (humano) já registrou um admin pela tela com outro usuário, a tentativa automática com `admin`/`FiapGames@Admin123` é rejeitada, e as credenciais que valem são as que você criou manualmente.
+2. **A Connection não tem endpoint HTTP simples de criação** — vive só na tabela `konga_kong_nodes` do banco da própria Konga, inserida via SQL direto pelo Job/serviço.
+3. **O ponto mais sutil:** qual connection está "ativa" para um usuário **não** é o campo `konga_kong_nodes.active` (isso só marca qual nó aparece destacado na lista) — é o campo `konga_users.node` (FK para `konga_kong_nodes.id`), que o frontend lê da **resposta do login** e guarda no `localStorage` do navegador. Sem esse campo setado, o menu **API GATEWAY** (Services/Routes/Consumers/Plugins) fica escondido mesmo com uma Connection já existindo no banco — e quem já estava logado só vê a mudança depois de deslogar e logar de novo (o valor é lido uma vez, no login, não em tempo real).
+
+Os dois passos (`konga-register` + `konga-connect`) rodam automaticamente toda vez que o ambiente sobe, e são idempotentes — seguro rodar de novo a qualquer momento.
 
 ### Segurança — o que está aberto de propósito
 
@@ -245,9 +259,26 @@ Deixar o `OPTIONS` passar não abre porta dos fundos: o preflight não carrega c
 
 O Catalog recebe o `userId` pelo body ou pela rota, nunca do token, e não lê nenhum header. Como existe um único `jwt_secret`, o `X-Consumer-ID` que o Kong injeta é igual para todos e não serve como identidade. Ou seja: **o gateway garante que o token é válido, mas o Catalog continua confiando no `userId` que o cliente enviar.** Propagar o claim `sub` exigiria o plugin `pre-function` ou mudança no Catalog.
 
+## Arquitetura de notificações
+
+O Notifications virou **Azure Function serverless** — mas só a parte de e-mail migrou. O RabbitMQ continua sendo o transporte de tudo que é negócio. As duas coisas convivem de propósito, não por inconsistência:
+
+| Fluxo | Transporte | Quem dispara |
+|---|---|---|
+| E-mail "usuário cadastrado" | **HTTP** → `POST /api/notifications/user-created` na Function | UsersAPI (`NotificationsClient`) |
+| E-mail "compra aprovada/rejeitada" | **HTTP** → `POST /api/notifications/payment-processed` na Function | PaymentsAPI (`NotificationsClient`) |
+| Catalog pede pagamento ao Payments | **RabbitMQ** (`OrderPlacedEvent`) | CatalogAPI |
+| Pedido → `Approved`/`Rejected` + jogo na biblioteca | **RabbitMQ** (`PaymentProcessedEvent`) | PaymentsAPI publica, CatalogAPI consome |
+
+O ponto que não é óbvio: **o `PaymentProcessedEvent` continua sendo publicado no RabbitMQ pelo Payments**, mesmo depois da migração — porque, além de alimentar a notificação (que saiu), ele é o que o `PaymentProcessedConsumer` do Catalog usa para aprovar o pedido e inserir o jogo em `UserGameLibraries`. Removê-lo deixaria toda compra eternamente `Pending`. A diferença em relação ao `UserCreatedEvent` do Users é que aquele só servia para notificar — não tinha outro consumidor — e por isso saiu do RabbitMQ sem quebrar nada.
+
+Os dois `NotificationsClient` (Users e Payments) seguem o mesmo desenho: `HttpClient` nomeado com `AddHttpClient<INotificationsClient, NotificationsClient>`, header `x-functions-key` com a chave (`Notifications__FunctionKey`), e um try/catch que rebaixa falha de notificação a `LogWarning` — porque notificação é acessória, não pode derrubar cadastro nem processamento de pagamento.
+
+**Consequência de a Function não estar em código no disco:** ela existe só deployada no Azure (`fiap-games-notification`, resource group `fiap-games`, região `westus3`). O contrato (`/api/notifications/user-created`, `/api/notifications/payment-processed`, ambos retornando `202 Accepted`) foi descoberto testando diretamente com a chave, não lendo código-fonte.
+
 ## Observabilidade (New Relic)
 
-Stack escolhida para o item 3 do Tech Challenge: **Opção B — plataforma de APM gerenciada, New Relic**. Cobre os três pilares exigidos, no gateway **e** nos quatro microsserviços.
+Stack escolhida para o item 3 do Tech Challenge: **Opção B — plataforma de APM gerenciada, New Relic**. Cobre os três pilares exigidos, no gateway **e** nos três microsserviços que ainda rodam localmente (Catalog, Payments, Users — o Notifications virou Azure Function serverless e está fora deste escopo, ver "Arquitetura de notificações" acima).
 
 > **Estado atual: desligado.** Tudo está versionado e inerte, esperando uma license key. Sem ela nada quebra e o ambiente sobe exatamente como antes. Guia completo de ativação: [`kong/NEWRELIC.md`](kong/NEWRELIC.md).
 
@@ -273,14 +304,14 @@ Com `CORECLR_ENABLE_PROFILING=0` (o default, vindo de `NEW_RELIC_ENABLED` no `.e
 
 ### Validado com conta real
 
-O caminho inteiro — agente nos 4 microsserviços **e** os dois plugins do gateway — foi validado com uma license key de verdade, não só com chave fictícia:
+O caminho inteiro — agente nos 3 microsserviços **e** os dois plugins do gateway — foi validado com uma license key de verdade, não só com chave fictícia:
 
 ```
 Agent dotnetfiapgames-catalog-api connected to collector.newrelic.com:443
 Agent fully connected.
 ```
 
-Confirmado nos 4 serviços. No fluxo de compra completo (cadastro → login → criar jogo → comprar → Payments processa → Notifications envia e-mail), todos os quatro reportaram `Transaction`/`Span` — incluindo **Payments e Notifications, que nunca recebem uma requisição HTTP**: eles geraram transações só por **consumir mensagem do RabbitMQ**, capturadas pelo wrapper MassTransit do agente. Ou seja, o trace atravessa a fila e liga Catalog → Payments → Notifications num único trace distribuído, exatamente o fluxo de "Compra de Jogo" que o enunciado pede.
+Confirmado nos 3 serviços. No fluxo de compra completo (cadastro → login → criar jogo → comprar → Payments processa → notifica a Function por HTTP), todos os três reportaram `Transaction`/`Span` — incluindo o **Payments, que nunca recebe uma requisição HTTP de entrada**: ele gera transação só por **consumir mensagem do RabbitMQ**, capturada pelo wrapper MassTransit do agente. Ou seja, o trace atravessa a fila e liga Catalog → Payments num único trace distribuído — o miolo do fluxo de "Compra de Jogo" que o enunciado pede. A notificação por e-mail saiu do RabbitMQ nesta migração e virou uma chamada HTTP direta à Azure Function (ver "Arquitetura de notificações" acima), então não aparece como `Transaction` de nenhum serviço local.
 
 Do lado do gateway, os endpoints da New Relic responderam `202` (Log API) e `200` (OTLP) para requisições de teste feitas da mesma rede Docker que o Kong usa, e o Admin API confirmou a chave de 40 caracteres carregada nos dois plugins — sem erro nenhum no log do Kong depois do reload.
 
@@ -333,13 +364,15 @@ docker compose up -d --build
 
 Isso builda a imagem de cada API a partir do Dockerfile do respectivo repositório irmão, sobe um único RabbitMQ compartilhado e o banco de cada serviço.
 
-Endpoints úteis:
+Endpoints úteis — todos pelo gateway (`:8080`/`:8081`/`:8083` estão comentadas no compose, ver aviso logo abaixo):
 
-- Catalog: `http://localhost:8080/swagger` | `http://localhost:8080/health`
-- Payments: `http://localhost:8081/health`
-- Users: `http://localhost:8083/swagger` | `http://localhost:8083/health`
+- Catalog: `http://localhost:8000/health` (público) | `/games`, `/orders`, `/library` (exigem token)
+- Payments: `http://localhost:8000/payments/health`
+- Users: `http://localhost:8000/api/users` (cadastro), `/api/users/login`
 
 - RabbitMQ management: `http://localhost:15672` (usuário `fiapgames-admin`, senha `FiapGames@Admin123`)
+- Kong Manager (GUI oficial, sem login): `http://localhost:8002`
+- Konga (GUI da comunidade): `http://localhost:1337` — **login já vem criado sozinho**, usuário `admin`, senha `FiapGames@Admin123` (ver [Duas UIs de administração](#duas-uis-de-administração))
 - Notifications (Azure): `https://fiap-games-notification-hdaza0g6fudjc3ak.westus3-01.azurewebsites.net/api/health`
 
 **As APIs não publicam porta no host.** As portas 8080–8083 estão comentadas no `docker-compose.yml` de propósito, para que o gateway seja de fato a única entrada — igual ao que já acontecia no Kubernetes. Para debug direto (por exemplo abrir o `/swagger` do Catalog), descomente o bloco `ports:` do serviço em questão e rode `docker compose up -d <serviço>`.
@@ -365,14 +398,14 @@ curl -s http://localhost:8001/routes    # o que foi carregado no banco
 
 ### Testando os dois fluxos completos (cadastro + compra)
 
-Validado de ponta a ponta com os 4 serviços reais rodando juntos, sem nenhuma simulação manual de evento. **Tudo passa pelo gateway (`:8000`)** — o que também demonstra a validação de JWT.
+Validado de ponta a ponta com os 3 serviços locais reais rodando juntos (Catalog, Payments, Users — o Notifications é serverless), sem nenhuma simulação manual de evento. **Tudo passa pelo gateway (`:8000`)** — o que também demonstra a validação de JWT.
 
 ```bash
 # 0. rota protegida SEM token -> 401 do próprio Kong, a requisição nem chega no Catalog
 curl -i http://localhost:8000/games
 
-# 1. cadastra um usuário no UsersAPI -> chama a Function de notificações por HTTP
-curl -X POST http://localhost:8083/api/users -H "Content-Type: application/json" \
+# 1. cadastra um usuário no UsersAPI (rota pública) -> chama a Function de notificações por HTTP
+curl -X POST http://localhost:8000/api/users -H "Content-Type: application/json" \
   -d '{"nome":"Maria Silva","email":"maria@example.com","password":"SenhaForte@123"}'
 
 # a notificação de boas-vindas aparece no Application Insights (ver "Conferindo as notificações")
@@ -390,11 +423,10 @@ curl -X POST http://localhost:8000/games -H "Authorization: Bearer $TOKEN" \
 
 # 4. compra o jogo (troque {gameId} e {userId} pelos ids retornados acima)
 #    -> Catalog publica OrderPlacedEvent -> Payments processa -> publica PaymentProcessedEvent
-#    -> Catalog atualiza o pedido/biblioteca, e o Payments chama a Function de notificações
-
-curl -X POST http://localhost:8083/games/{gameId}/purchase -H "Content-Type: application/json" \
-  -d '{"userId":"{userId}"}'
-
+#      (RabbitMQ, negócio: Catalog aprova o pedido e libera o jogo na biblioteca)
+#    -> Payments também chama a Function de notificações por HTTP (e-mail de confirmação)
+curl -X POST http://localhost:8000/games/{gameId}/purchase -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -d '{"userId":"{userId}"}'
 
 # 5. acompanha o pedido até virar Approved/Rejected
 curl http://localhost:8000/orders/{orderId} -H "Authorization: Bearer $TOKEN"
@@ -410,7 +442,7 @@ curl -i http://localhost:8000/games -H "Authorization: Bearer aaa.bbb.ccc"
 ### Conferindo as políticas do gateway
 
 ```bash
-# correlation-id ecoado na resposta (rastreia a requisição pelos 4 serviços)
+# correlation-id ecoado na resposta (rastreia a requisição pelos 3 serviços locais)
 curl -is http://localhost:8000/health | grep -i correlation
 
 # rate limiting: aparecem 429 depois de 100 requisições no mesmo minuto
@@ -447,11 +479,7 @@ docker compose down -v
 
 > **Sobre o API Gateway:** o Kong entrou nesta fase e **exige recriar o cluster** — o `kind-config.yaml` publica as portas do gateway no host via `extraPortMappings`, e isso só pode ser definido na criação do cluster. Se você já tem o cluster `fiapgames` de antes, rode `kind delete cluster --name fiapgames` e comece do passo 1. Como toda a infra usa `emptyDir`, não há dado a preservar.
 
-> **Status atual: os 4 microsserviços foram testados no cluster Kind.** O `Fiap.Games.Users` originalmente trazia sua própria pasta `k8s/` isolada (namespace `games-fiap`, RabbitMQ e SQL Server próprios) — foi reconciliada para usar o namespace e a infraestrutura compartilhados (`fiapgames`), do mesmo jeito que os outros três. Os manifestos de infra e RabbitMQ próprios do Users foram removidos (`00-namespace.yaml`, `rabbitmq.yaml`, `sqlserver.yaml`, `kustomization.yaml`); um novo `sqlserver-users.yaml` (SQL Server dedicado do Users, já que cada serviço tem seu próprio banco) foi adicionado aqui, em `k8s/`.
-
-> **O Notifications não é mais implantado no cluster** — virou Azure Functions serverless. Os manifestos abaixo cobrem Catalog, Payments e Users.
-
-> **Status atual: os microsserviços foram testados no cluster Kind.** O `Fiap.Games.Users` originalmente trazia sua própria pasta `k8s/` isolada (namespace `games-fiap`, RabbitMQ e SQL Server próprios) — foi reconciliada para usar o namespace e a infraestrutura compartilhados (`fiapgames`), do mesmo jeito que os outros três. Os manifestos de infra e RabbitMQ próprios do Users foram removidos (`00-namespace.yaml`, `rabbitmq.yaml`, `sqlserver.yaml`, `kustomization.yaml`); um novo `sqlserver-users.yaml` (SQL Server dedicado do Users, já que cada serviço tem seu próprio banco) foi adicionado aqui, em `k8s/`.
+> **Status atual: Catalog, Payments e Users foram testados no cluster Kind; o Notifications não é mais implantado lá** — virou Azure Functions serverless, fora do cluster. O `Fiap.Games.Users` originalmente trazia sua própria pasta `k8s/` isolada (namespace `games-fiap`, RabbitMQ e SQL Server próprios) — foi reconciliada para usar o namespace e a infraestrutura compartilhados (`fiapgames`), do mesmo jeito que os outros dois. Os manifestos de infra e RabbitMQ próprios do Users foram removidos (`00-namespace.yaml`, `rabbitmq.yaml`, `sqlserver.yaml`, `kustomization.yaml`); um novo `sqlserver-users.yaml` (SQL Server dedicado do Users, já que cada serviço tem seu próprio banco) foi adicionado aqui, em `k8s/`.
 
 Cada microsserviço mantém seus próprios manifestos (`Deployment`, `ConfigMap`/`Secret`, e no caso do Catalog e do Users também `Service`) em `k8s/` no respectivo repositório. Esses manifestos assumem que a infraestrutura compartilhada (RabbitMQ, Postgres, SQL Server) já existe no cluster com hostnames fixos:
 
@@ -478,10 +506,10 @@ Nenhum repositório de microsserviço traz manifesto de Deployment/Service para 
 kind create cluster --config kind-config.yaml
 
 # 2. sobe a infraestrutura compartilhada
-#    (namespace + rabbitmq + postgres + postgres-kong + sqlserver + sqlserver-users + mailhog)
+#    (namespace + rabbitmq + postgres + postgres-kong + sqlserver + sqlserver-users)
 #    namespace.yaml precisa ir primeiro e separado: "kubectl apply -f k8s/" aplica os arquivos
-#    em ordem alfabética, e "mailhog.yaml" vem antes de "namespace.yaml" nessa ordem — sem esse
-#    apply em separado, ele falha com "namespaces \"fiapgames\" not found"
+#    em ordem alfabética, e alguns deles vêm antes de "namespace.yaml" nessa ordem — sem esse
+#    apply em separado, o resto falha com "namespaces \"fiapgames\" not found"
 kubectl apply -f k8s/namespace.yaml
 kubectl apply -f k8s/
 
@@ -520,8 +548,13 @@ kubectl get pods -n fiapgames
 #    8a. a Secret com a config declarativa é GERADA a partir do arquivo canônico,
 #        em vez de ser um manifesto próprio — assim o conteúdo do kong.yml nunca
 #        fica duplicado em dois lugares. É idempotente, pode rodar quantas vezes quiser.
+#        A chave é "kong.yml.template" (não "kong.yml"): é o nome que o Job de
+#        bootstrap espera ao montar o volume — ele lê o .template, roda o sed
+#        (substitui <NEW_RELIC_LICENSE_KEY> pela Secret `newrelic`, se existir)
+#        e só então importa o resultado. Errar esse nome faz o Job falhar com
+#        "sed: can't read /kong/declarative/kong.yml.template" — já aconteceu.
 kubectl create secret generic kong-declarative-config -n fiapgames \
-  --from-file=kong.yml=kong/kong.k8s.yml --dry-run=client -o yaml | kubectl apply -f -
+  --from-file=kong.yml.template=kong/kong.k8s.yml --dry-run=client -o yaml | kubectl apply -f -
 
 #    8b. aplica os manifestos. Os prefixos numéricos garantem a ordem, já que
 #        "kubectl apply -f" aplica em ordem alfabética:
@@ -538,12 +571,12 @@ Pronto — o gateway está em `http://localhost:8000` e é por ali que tudo deve
 | Endereço | O que é |
 |---|---|
 | `http://localhost:8000` | **proxy** — a API inteira (`/api/users`, `/games`, `/orders`, `/library`, `/health`) |
-| `http://localhost:8002` | Kong Manager (GUI oficial) |
-| `http://localhost:1337` | Konga (GUI da comunidade) |
+| `http://localhost:8002` | Kong Manager (GUI oficial, sem login) |
+| `http://localhost:1337` | Konga (GUI da comunidade) — **login já vem criado sozinho**: usuário `admin`, senha `FiapGames@Admin123` |
 | `http://localhost:8001` | Admin API do Kong |
 | `http://localhost:8100/metrics` | métricas Prometheus |
 
-> Se o pod do `postgres-kong` reiniciar, o volume é `emptyDir` — schema e rotas vão embora junto. Para reconstruir: `kubectl delete job kong-bootstrap konga-prepare -n fiapgames` e repetir o passo 8.
+> Se o pod do `postgres-kong` reiniciar, o volume é `emptyDir` — schema, rotas, **e o login/Connection da Konga** vão embora junto. Para reconstruir: `kubectl delete job kong-bootstrap konga-prepare konga-connect -n fiapgames` e repetir o passo 8 (o `konga-connect` recria o admin e a Connection sozinho, sem precisar mexer na tela).
 
 **Passo 9 (opcional — bypass do gateway, só para debug).** Depois do passo 8 isto não é mais necessário: o front e os testes vão todos por `http://localhost:8000`. Serve só para bater direto num serviço, contornando o Kong e a validação de JWT — útil para isolar se um problema é do gateway ou da aplicação, e para acessar o `/swagger` do Catalog (que não é roteado pelo gateway, porque proteger asset estático com JWT impediria o browser de carregá-lo).
 
@@ -553,12 +586,14 @@ O `Service` do `user-api` é `ClusterIP` e o do `catalog-api` é `NodePort 30080
 # 9. (opcional) acesso direto, sem gateway
 Start-Process kubectl -ArgumentList 'port-forward -n fiapgames svc/catalog-api 8090:80' -WindowStyle Hidden
 Start-Process kubectl -ArgumentList 'port-forward -n fiapgames svc/user-api 8091:80' -WindowStyle Hidden
-Start-Process kubectl -ArgumentList 'port-forward -n fiapgames svc/mailhog 8025:8025' -WindowStyle Hidden
+Start-Process kubectl -ArgumentList 'port-forward -n fiapgames svc/payments-api 8092:80' -WindowStyle Hidden
 ```
+
+> Não há `svc/mailhog` para encaminhar — o Notifications (e o Mailhog que ele usava) não roda mais no cluster. As notificações de verdade agora vão para a Azure Function; conferir em Application Insights, não no Mailhog.
 
 > O passo 7 (`imagePullPolicy: IfNotPresent`) só é necessário para teste local com Kind, porque as imagens não foram publicadas de verdade no Docker Hub ainda. Depois que as imagens forem publicadas (`docker push`) e os manifestos apontarem para um registry real, isso deixa de ser necessário — o comportamento padrão (`imagePullPolicy: Always` para tag `latest`) volta a ser o correto.
 
-**Resultado esperado** — todos os 7 pods `1/1 Running` + o Job de migration do Users `Completed`:
+**Resultado esperado** — 10 pods `1/1 Running` + 3 Jobs `Completed` (Notifications não roda mais no cluster — é serverless):
 
 ```
 NAME                                 READY   STATUS      RESTARTS   AGE
@@ -567,8 +602,6 @@ kong-xxxxxxxxxx-xxxxx                1/1     Running     0          2m
 kong-bootstrap-xxxxx                 0/1     Completed   0          2m
 konga-xxxxxxxxxx-xxxxx               1/1     Running     0          2m
 konga-prepare-xxxxx                  0/1     Completed   0          2m
-mailhog-xxxxxxxxxx-xxxxx             1/1     Running     0          10m
-notifications-api-xxxxxxxxxx-xxxxx   1/1     Running     0          5m
 payments-api-xxxxxxxxxx-xxxxx        1/1     Running     0          5m
 postgres-xxxxxxxxxx-xxxxx            1/1     Running     0          10m
 postgres-kong-xxxxxxxxxx-xxxxx       1/1     Running     0          10m
@@ -613,16 +646,15 @@ stern -n fiapgames ".*" --include "error|Error|Exception"
 # só o gateway (útil para ver o access log do proxy e os 401 do plugin jwt)
 stern -n fiapgames kong
 
-# seguir uma requisição específica pelos 4 serviços, pelo header do correlation-id
+# seguir uma requisição específica pelos 3 serviços locais, pelo header do correlation-id
 stern -n fiapgames ".*" --include "<valor-do-X-Correlation-ID>"
 ```
 
-Testando os dois fluxos completos através dos Services do Catalog e do Users (o Payments não expõe Service HTTP — ele só reage a eventos do RabbitMQ):
+Tudo entra por `http://localhost:8000` (Payments não expõe Service HTTP no gateway além de `/payments/health` — o resto dele só reage a eventos do RabbitMQ):
 
-Tudo entra por `http://localhost:8000` (Payments e Notifications não expõem Service HTTP — eles só reagem a eventos do RabbitMQ):
-
-# cadastro -> notificação de boas-vindas na Azure Function
-curl -X POST http://localhost:8091/api/users -H "Content-Type: application/json" \
+```bash
+# 1. cadastro (rota pública) -> Users chama a Function de notificações por HTTP
+curl -X POST http://localhost:8000/api/users -H "Content-Type: application/json" \
   -d '{"nome":"Joao K8s","email":"joao.k8s@example.com","password":"SenhaForte@123"}'
 
 # 2. login (rota pública) -> access token
@@ -642,11 +674,14 @@ curl http://localhost:8000/orders/{orderId} -H "Authorization: Bearer $TOKEN"
 
 # 4. biblioteca — Catalog busca nome/e-mail reais no Users via RabbitMQ dentro do cluster
 curl http://localhost:8000/library/{userId} -H "Authorization: Bearer $TOKEN"
+
+# 5. health check do Payments pelo gateway
+curl http://localhost:8000/payments/health
 ```
 
 Validado de ponta a ponta dentro de um cluster Kind real, **antes da migração do Notifications para serverless**: o cadastro publicou `UserCreatedEvent` e o e-mail de boas-vindas chegou no Notifications; a compra foi `Approved` pelo Payments e a confirmação também chegou por e-mail; e `GET /library/{userId}` retornou nome/e-mail reais do usuário (via `UserLookupRequested`/`Responded` no RabbitMQ) junto com o jogo comprado.
 
-> Após a migração, o trecho de notificação desse fluxo passou a ser uma chamada HTTP à Azure Function, conferível no Application Insights. **Esse novo caminho ainda não foi revalidado dentro do cluster Kind** — só o `docker compose` foi ajustado e verificado.
+> Após a migração, o trecho de notificação desse fluxo passou a ser uma chamada HTTP à Azure Function, conferível no Application Insights. **Esse novo caminho — e o novo `payments-api-service.yaml` — ainda não foram revalidados dentro do cluster Kind.** Só o `docker compose` foi ajustado e verificado ponta a ponta.
 
 ### Front-end contra o gateway
 

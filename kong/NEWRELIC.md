@@ -1,16 +1,18 @@
 # Observabilidade com New Relic
 
 Item 3 do Tech Challenge, **Opção B (plataforma de APM gerenciada)**. Cobre os três
-pilares que o enunciado exige — métricas, logs e traces — no gateway **e** nos quatro
-microsserviços.
+pilares que o enunciado exige — métricas, logs e traces — no gateway **e** nos três
+microsserviços que ainda rodam localmente (Catalog, Payments, Users). O Notifications
+virou Azure Function serverless e está fora deste escopo — ver a seção "Arquitetura de
+notificações" no [README](../README.md).
 
 > **Estado atual: desligado por padrão, mas os plugins já ficam ATIVOS no arquivo.**
-> Diferente da primeira versão deste guia, `http-log` e `opentelemetry` não estão mais
-> comentados — eles ficam sempre presentes em `kong/kong.*.yml`, e um passo de
-> bootstrap troca o placeholder `<NEW_RELIC_LICENSE_KEY>` pela chave real (ou por uma
-> string vazia, se não houver chave configurada). Sem chave, a New Relic recusa os
-> envios com 401/403 — visível só no log do Kong, sem afetar o tráfego normal. Ver
-> [Como a chave chega lá sem tocar o arquivo](#como-a-chave-chega-lá-sem-tocar-o-arquivo).
+> `http-log` e `opentelemetry` não ficam comentados — eles ficam sempre presentes em
+> `kong/kong.*.yml`, e um passo de bootstrap troca o placeholder
+> `<NEW_RELIC_LICENSE_KEY>` pela chave real (ou por um valor de fallback não-vazio, se
+> não houver chave configurada — ver por quê logo abaixo). Sem chave real, a New Relic
+> recusa os envios com 401/403 — visível só no log do Kong, sem afetar o tráfego normal.
+> Ver [Como a chave chega lá sem tocar o arquivo](#como-a-chave-chega-lá-sem-tocar-o-arquivo).
 
 ---
 
@@ -88,11 +90,27 @@ bootstrap, lendo a chave de uma variável de ambiente:
 - **Kubernetes**: o Job `kong-bootstrap` (container `seed`) lê `NEW_RELIC_LICENSE_KEY` de
   `secretKeyRef: {name: newrelic, key: license-key, optional: true}`. O `optional: true`
   é o que mantém o fluxo padrão (sem a Secret `newrelic` criada) funcionando: a variável
-  simplesmente não é definida, o `sed` substitui o placeholder por uma string vazia, e o
-  `db_import` segue normalmente — só que a New Relic recusa os envios até a chave existir.
+  simplesmente não é definida.
 
 Por isso o `kong/kong.*.yml` versionado **nunca contém a chave real** — só o placeholder
 — e o repositório pode ser commitado com os plugins ativos sem vazar segredo nenhum.
+
+> **Achado real, não teórico: string vazia quebra o gateway INTEIRO, não só a New Relic.**
+> A primeira versão deste mecanismo substituía o placeholder por uma string vazia quando
+> não havia chave, assumindo que isso seria inofensivo (a New Relic simplesmente
+> rejeitaria com 401/403). **Errado** — medido diretamente num cluster kind sem a Secret
+> `newrelic`: `kong config db_import` falha a validação de **schema** do próprio Kong
+> (`in 'headers': length must be at least 1` — o campo `headers` do `http-log`/
+> `opentelemetry` exige valor com pelo menos 1 caractere). Isso não falha só esses dois
+> plugins: **aborta o import inteiro**, e nenhum service/route/plugin de JWT carrega —
+> o gateway inteiro fica sem configuração nenhuma, até `/health` para de responder.
+>
+> A correção, já aplicada no `sed` dos dois lugares (`docker-compose.yml` e
+> `k8s/kong/01-kong-bootstrap-job.yaml`): um fallback **não-vazio**—
+> `${NEW_RELIC_LICENSE_KEY:-license-key-not-configured}`. O placeholder vira essa string
+> de propósito quando não há chave real: satisfaz o schema do Kong (o import e o
+> roteamento seguem normais), e a New Relic só rejeita esse valor específico em runtime,
+> exatamente como o comportamento originalmente pretendido.
 
 > **Por que não `envsubst`?** É o caminho mais comum para isso, mas a imagem `kong:3.9`
 > (Ubuntu 24.04) não traz `envsubst` — instalar via `apt-get` a cada bootstrap seria lento
@@ -155,10 +173,12 @@ patches de `imagePullPolicy` do passo 7 do README; o gateway recarrega o Job de 
 (que agora enxerga a Secret `newrelic` e faz a substituição sozinho) e reinicia:
 
 ```powershell
-kubectl patch deployment catalog-api       -n fiapgames --patch-file k8s/patches/catalog-api-newrelic.json
-kubectl patch deployment payments-api      -n fiapgames --patch-file k8s/patches/payments-api-newrelic.json
-kubectl patch deployment notifications-api -n fiapgames --patch-file k8s/patches/notifications-api-newrelic.json
-kubectl patch deployment user-api          -n fiapgames --patch-file k8s/patches/user-api-newrelic.json
+kubectl patch deployment catalog-api  -n fiapgames --patch-file k8s/patches/catalog-api-newrelic.json
+kubectl patch deployment payments-api -n fiapgames --patch-file k8s/patches/payments-api-newrelic.json
+kubectl patch deployment user-api     -n fiapgames --patch-file k8s/patches/user-api-newrelic.json
+# Só estes 3 — o Notifications virou Azure Function serverless e não tem Deployment
+# no cluster. O patch dele (k8s/patches/notifications-api-newrelic.json) foi removido
+# do repositório quando essa migração aconteceu; não recriar.
 
 # tracing no gateway (o manifesto vem com "off")
 kubectl set env deployment/kong -n fiapgames `
@@ -189,7 +209,7 @@ Ele se deposita em `/app/newrelic` no publish, então:
 Compatibilidade confirmada: .NET 10 exige agente **≥ 10.0.0**, e ASP.NET Core 10.0 é
 suportado.
 
-As variáveis, iguais nos 4 serviços (só `NEW_RELIC_APP_NAME` muda):
+As variáveis, iguais nos 3 serviços (só `NEW_RELIC_APP_NAME` muda):
 
 ```
 CORECLR_ENABLE_PROFILING=1
@@ -264,19 +284,22 @@ aguarde o próximo ciclo de harvest (a cada 2 minutos; ver o `AgentHealthReporte
 do agente).
 
 Confirmado na prática, no fluxo de compra completo (cadastro → login → criar jogo →
-comprar → Payments processa → Notifications envia e-mail):
+comprar → Payments processa → notifica a Function por HTTP):
 
 | Serviço | Como recebeu tráfego | Confirmado |
 |---|---|---|
 | `fiapgames-catalog-api` | HTTP (GET /games, /orders) | 6 Transaction, 15 Span events |
 | `fiapgames-users-api` | HTTP (login, cadastro) | 1-2 Transaction, 7-56 Span events |
-| `fiapgames-payments-api` | **só fila RabbitMQ** (nunca HTTP) | 1 Transaction, 5 Span events |
-| `fiapgames-notifications-api` | **só fila RabbitMQ** (nunca HTTP) | 2 Transaction, 8 Span events |
+| `fiapgames-payments-api` | **só fila RabbitMQ** (nunca HTTP de entrada) | 1 Transaction, 5 Span events |
 
-Payments e Notifications gerarem `Transaction` **sem nunca terem recebido uma requisição
-HTTP** é a prova de que o wrapper MassTransit do agente captura o consumo de mensagem —
-ou seja, o trace atravessa o RabbitMQ e liga Catalog → Payments → Notifications, que é
-exatamente o fluxo de "Compra de Jogo" que o enunciado pede.
+Payments gerar `Transaction` **sem nunca ter recebido uma requisição HTTP de entrada** é
+a prova de que o wrapper MassTransit do agente captura o consumo de mensagem — ou seja, o
+trace atravessa o RabbitMQ e liga Catalog → Payments, que é o miolo do fluxo de "Compra de
+Jogo" que o enunciado pede. A notificação por e-mail (cadastro e confirmação de compra)
+saiu do RabbitMQ nesta migração e agora é uma chamada HTTP direta à Azure Function — ver
+"Arquitetura de notificações" no [README](../README.md) — por isso não aparece como
+`Transaction` de nenhum serviço local: quem instrumentaria essa parte seria a própria
+Function, fora do escopo deste guia.
 
 No New Relic:
 
@@ -284,8 +307,8 @@ No New Relic:
 |---|---|
 | **Logs** | `SELECT * FROM Log SINCE 10 minutes ago` — o log de acesso do Kong |
 | **Logs** | `SELECT count(*) FROM Log FACET response.status` — a distribuição 200/401 |
-| **APM & Services** | 4 apps: `fiapgames-{catalog,payments,notifications,users}-api` |
-| **Distributed tracing** | o trace de Compra de Jogo, com spans do gateway + 4 serviços |
+| **APM & Services** | 3 apps: `fiapgames-{catalog,payments,users}-api` |
+| **Distributed tracing** | o trace de Compra de Jogo, com spans do gateway + Catalog + Payments |
 | **Dashboards** | `SELECT average(duration) FROM Transaction FACET appName` |
 
 ### O teste que justifica instrumentar os serviços

@@ -119,6 +119,32 @@ services:
         methods: ["GET", "OPTIONS"]
         strip_path: false
 
+  # ---------------------------------------------------------------------------
+  # PaymentsAPI — é essencialmente um worker de RabbitMQ. Sua única rota HTTP é
+  # GET /health (confirmado: nunca teve um [HttpPost] em toda a história do
+  # repositório). Está no gateway para completar o desenho de porta de entrada
+  # única, não porque tenha superfície de negócio. Sem plugin jwt: health check
+  # precisa ficar aberto para probes.
+  # ---------------------------------------------------------------------------
+  - name: payments-api-public
+    url: http://payments-api.fiapgames.svc.cluster.local:80
+    routes:
+      # Path com prefixo /payments porque /health já é do catalog-health acima
+      # (é o que o HealthBadge do front consome) — colidir quebraria o front.
+      #
+      # `paths` é o PREFIXO "/payments", não o path inteiro "/payments/health".
+      # Com strip_path: true o Kong remove só o que casou em `paths` e repassa o
+      # resto — "/payments" + "/health" = "/payments/health" chega, casa o
+      # prefixo "/payments", sobra "/health" para o upstream. Se `paths` fosse
+      # "/payments/health" (o path inteiro), o strip removeria tudo e o upstream
+      # receberia "GET /" — foi medido: 404 do Kestrel, não do Kong (a resposta
+      # trazia `Server: Kestrel` e `X-Kong-Upstream-Latency`, provando que o
+      # Kong roteou certo e foi o .NET que não achou endpoint para "/").
+      - name: payments-health
+        paths: ["/payments"]
+        methods: ["GET", "OPTIONS"]
+        strip_path: true
+
 # -----------------------------------------------------------------------------
 # Credencial JWT. `key` TEM que ser igual ao claim `iss` que o UsersAPI emite
 # (Jwt__Issuer), e `secret` são os bytes UTF-8 crus da chave de assinatura
