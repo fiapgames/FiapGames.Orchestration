@@ -106,16 +106,19 @@ services:
         condition: service_healthy
     # Porta NÃO publicada: o Kong (:8000) é a única porta de entrada.
     #
-    # Isto importa especialmente aqui — o CatalogAPI não tem autenticação nenhuma no
-    # código (sem AddAuthentication, sem [Authorize]), então o gateway é a ÚNICA
-    # barreira. Com a porta publicada era possível criar jogo e COMPRAR sem token
-    # nenhum, batendo direto em localhost:8080 e contornando o plugin jwt.
+    # O CatalogAPI agora também valida JWT no próprio código (AddJwtBearer no
+    # Program.cs, [Authorize] em Games/Orders/Library — /health continua aberto)
+    # — defesa em profundidade, igual ao UsersAPI. Antes disso o gateway era a
+    # ÚNICA barreira: com a porta publicada dava pra criar jogo e COMPRAR sem
+    # token nenhum, batendo direto em localhost:8080 e contornando o plugin jwt.
+    # A porta segue comentada mesmo assim, para o compose ter uma porta de
+    # entrada só.
     #
     # No Kubernetes isso já era fechado: o kind-config.yaml só publica as portas do
     # gateway. Comentar aqui deixa o compose com a mesma postura.
     #
     # Descomente para debug direto (ex.: abrir o /swagger) — mas saiba que isso
-    # contorna a validação de JWT.
+    # contorna a validação de JWT do Kong (a própria API ainda vai exigir token).
     # ports:
     #   - "8080:8080"
     environment:
@@ -126,6 +129,7 @@ services:
       RabbitMq__VirtualHost: "/"
       RabbitMq__UserName: fiapgames-admin
       RabbitMq__Password: FiapGames@Admin123
+      Jwt__SecretKey: "dev-only-change-this-secret-key-32-bytes-minimum"
 
   payments-api:
     build:
@@ -166,9 +170,9 @@ services:
       sqlserver-users:
         condition: service_healthy
     # Não publicada: acesso pelo gateway (:8000/api/users).
-    # Este é o único serviço que se defende sozinho — valida JWT no próprio código
-    # (AddJwtBearer no Program.cs), então dava 401 mesmo quando era acessado direto.
-    # Fechado ainda assim, para o compose ter uma porta de entrada só.
+    # Valida JWT no próprio código (AddJwtBearer no Program.cs) — dá 401 mesmo
+    # quando acessado direto, igual ao CatalogAPI. Fechado ainda assim, para o
+    # compose ter uma porta de entrada só.
     # ports:
     #   - "8083:8080"
     environment:
