@@ -1,6 +1,15 @@
+# Credenciais reais. O template versionado é o .env.example.
+# É aqui que fica a license key da New Relic — nunca commitar.
 # Variáveis de ambiente locais (contém a chave da Azure Function de notificações)
 .env
+.env.local
 .env.*
 !.env.example
+
+# Visual Studio (pasta-como-solução)
+.vs/
+
+# Logs soltos
+*.log
 
 .DS_Store

@@ -1,0 +1,26 @@
+# Service para o payments-api. Vive aqui (e não no repo FiapGames.Payments)
+# porque aquele repositório só traz Deployment/ConfigMap/Secret — nunca teve um
+# Service, já que o Payments nunca precisou ser alcançado por HTTP até agora.
+#
+# Sem este Service o Kong não tem upstream estável no cluster: o
+# `payments-api-public` em kong/kong.k8s.yml aponta para
+# payments-api.fiapgames.svc.cluster.local:80, que só existe se este manifesto
+# for aplicado.
+#
+# ClusterIP (sem NodePort): o Payments não deve ser alcançável direto do host —
+# só o Kong, pela rede interna do cluster. Mesmo princípio já aplicado no
+# docker-compose (porta do payments-api não publicada).
+apiVersion: v1
+kind: Service
+metadata:
+  name: payments-api
+  namespace: fiapgames
+  labels:
+    app: payments-api
+spec:
+  selector:
+    app: payments-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080

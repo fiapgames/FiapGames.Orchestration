@@ -1,0 +1,98 @@
+# Dedicated Postgres for the API Gateway (Kong + Konga) — deliberately SEPARATE
+# from k8s/postgres.yaml, which runs postgres:16 for Payments and Notifications.
+#
+# Two reasons this is not shared:
+#   1. Konga ships an old sails-postgresql driver that breaks on modern Postgres,
+#      so the version is pinned to 11.16 (same as the reference compose project).
+#   2. Database per service: the gateway is a service like any other, and the repo
+#      already does this with sqlserver (Catalog) vs sqlserver-users (Users).
+#
+# Lives in k8s/ (not k8s/kong/) so it comes up with the rest of the shared infra
+# in README step 2 — well before the gateway needs it in step 8.
+#
+# Hostname the gateway manifests reference: postgres-kong.fiapgames.svc.cluster.local
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-kong-init
+  namespace: fiapgames
+data:
+  # Kong itself uses the `kong` database (POSTGRES_DB). Konga needs its own.
+  # Kept inline here (2 lines) rather than shared with kong/init.sql, which the
+  # docker-compose flow bind-mounts — duplicating this is cheaper than adding an
+  # imperative `kubectl create configmap --from-file` step to the deploy.
+  init.sql: |
+    CREATE DATABASE konga;
+    GRANT ALL PRIVILEGES ON DATABASE konga TO kong;
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-kong
+  namespace: fiapgames
+  labels:
+    app: postgres-kong
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-kong
+  template:
+    metadata:
+      labels:
+        app: postgres-kong
+    spec:
+      containers:
+        - name: postgres-kong
+          # Pinned on purpose — do NOT bump. Konga breaks on newer Postgres.
+          image: postgres:11.16
+          env:
+            - name: POSTGRES_USER
+              value: "kong"
+            - name: POSTGRES_PASSWORD
+              value: "kong"
+            - name: POSTGRES_DB
+              value: "kong"
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "kong"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 10
+          volumeMounts:
+            - name: postgres-kong-data
+              mountPath: /var/lib/postgresql/data
+            - name: init-scripts
+              mountPath: /docker-entrypoint-initdb.d
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      volumes:
+        # emptyDir like the rest of the infra in this repo: if the pod restarts,
+        # the Kong schema and the seeded routes are gone and the bootstrap Job
+        # has to run again (see README).
+        - name: postgres-kong-data
+          emptyDir: {}
+        - name: init-scripts
+          configMap:
+            name: postgres-kong-init
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-kong
+  namespace: fiapgames
+  labels:
+    app: postgres-kong
+spec:
+  selector:
+    app: postgres-kong
+  ports:
+    - port: 5432
+      targetPort: 5432

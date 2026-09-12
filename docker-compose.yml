@@ -1,3 +1,32 @@
+# ===========================================================================
+# Agente APM da New Relic — item 3 do Tech Challenge (Observabilidade).
+#
+# DESLIGADO por padrão: com CORECLR_ENABLE_PROFILING=0 o CLR não carrega o
+# profiler, então o agente fica completamente inerte — sem custo e sem erro,
+# mesmo sem license key. Para ligar, copie .env.example para .env e ponha
+# NEW_RELIC_ENABLED=1 com a chave. Guia completo em kong/NEWRELIC.md
+#
+# O agente chega pelo pacote NuGet NewRelic.Agent, referenciado no .csproj de
+# cada API. Ele se deposita em /app/newrelic no publish, então os Dockerfiles
+# não precisam de wget (a imagem aspnet:10.0 é Debian-slim e não tem) nem de
+# mudança nenhuma — toda a configuração é por variável de ambiente, aqui.
+#
+# Âncora YAML para não repetir estas 8 linhas nos 4 serviços.
+# ===========================================================================
+x-newrelic-agent: &newrelic-agent
+  CORECLR_ENABLE_PROFILING: "${NEW_RELIC_ENABLED:-0}"
+  # GUID do profiler da New Relic para CoreCLR — valor fixo, não é um id nosso.
+  CORECLR_PROFILER: "{36032161-FFC0-4B61-B559-F6C5D41BAE5A}"
+  CORECLR_NEWRELIC_HOME: /app/newrelic
+  CORECLR_PROFILER_PATH: /app/newrelic/libNewRelicProfiler.so
+  NEW_RELIC_LICENSE_KEY: "${NEW_RELIC_LICENSE_KEY:-}"
+  # Logs-in-context: amarra cada log à transação/span que o gerou, sem mudar código.
+  NEW_RELIC_APPLICATION_LOGGING_ENABLED: "true"
+  NEW_RELIC_APPLICATION_LOGGING_FORWARDING_ENABLED: "true"
+  # Consome o traceparent W3C que o Kong propaga — é o que costura o trace da
+  # Compra de Jogo através de gateway -> catalog -> payments -> notifications.
+  NEW_RELIC_DISTRIBUTED_TRACING_ENABLED: "true"
+
 services:
   rabbitmq:
     image: rabbitmq:3-management
@@ -65,6 +94,43 @@ services:
     volumes:
       - sqlserver-users-data:/var/opt/mssql
 
+  # Persistência poliglota do Catalog (item 4 do Tech Challenge): histórico de
+  # eventos de compra (append-only, sem join, sem migration no SQL Server).
+  mongodb:
+    image: mongo:7
+    container_name: fiapgames-catalog-mongo
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: fiapgames-admin
+      MONGO_INITDB_ROOT_PASSWORD: FiapGames@Admin123
+    ports:
+      - "27017:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - mongodb-data:/data/db
+
+  # Cache distribuído do Catalog (item 4 do Tech Challenge): resultados de
+  # consultas onerosas (catálogo de jogos, biblioteca do usuário). Sem senha —
+  # é cache, não fonte de verdade — por isso a connection string vive no
+  # ConfigMap/environment, não num Secret.
+  redis:
+    image: redis:7-alpine
+    container_name: fiapgames-redis
+    ports:
+      # 6380 no host: a 6379 já está em uso por outro projeto nesta máquina.
+      # Comunicação entre containers usa sempre a porta interna (redis:6379).
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - redis-data:/data
+
   catalog-api:
     build:
       context: ../FiapGames.Catalog
@@ -75,14 +141,38 @@ services:
         condition: service_healthy
       sqlserver-catalog:
         condition: service_healthy
-    ports:
-      - "8080:8080"
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Porta NÃO publicada: o Kong (:8000) é a única porta de entrada.
+    #
+    # O CatalogAPI agora também valida JWT no próprio código (AddJwtBearer no
+    # Program.cs, [Authorize] em Games/Orders/Library — /health continua aberto)
+    # — defesa em profundidade, igual ao UsersAPI. Antes disso o gateway era a
+    # ÚNICA barreira: com a porta publicada dava pra criar jogo e COMPRAR sem
+    # token nenhum, batendo direto em localhost:8080 e contornando o plugin jwt.
+    # A porta segue comentada mesmo assim, para o compose ter uma porta de
+    # entrada só.
+    #
+    # No Kubernetes isso já era fechado: o kind-config.yaml só publica as portas do
+    # gateway. Comentar aqui deixa o compose com a mesma postura.
+    #
+    # Descomente para debug direto (ex.: abrir o /swagger) — mas saiba que isso
+    # contorna a validação de JWT do Kong (a própria API ainda vai exigir token).
+    # ports:
+    #   - "8080:8080"
     environment:
+      <<: *newrelic-agent
+      NEW_RELIC_APP_NAME: fiapgames-catalog-api
       ConnectionStrings__SqlServer: "Server=sqlserver-catalog,1433;Database=fiapgames-catalog;User Id=sa;Password=FiapGames@Admin123;TrustServerCertificate=True"
       RabbitMq__Host: rabbitmq
       RabbitMq__VirtualHost: "/"
       RabbitMq__UserName: fiapgames-admin
       RabbitMq__Password: FiapGames@Admin123
+      Jwt__SecretKey: "dev-only-change-this-secret-key-32-bytes-minimum"
+      ConnectionStrings__Mongo: "mongodb://fiapgames-admin:FiapGames%40Admin123@mongodb:27017"
+      Redis__Connection: "redis:6379"
 
   payments-api:
     build:
@@ -94,9 +184,13 @@ services:
         condition: service_healthy
       postgres-payments:
         condition: service_healthy
-    ports:
-      - "8081:8080"
+    # Não publicada — só reage a eventos do RabbitMQ, não tem rota no gateway.
+    # Descomente para alcançar o /health direto.
+    # ports:
+    #   - "8081:8080"
     environment:
+      <<: *newrelic-agent
+      NEW_RELIC_APP_NAME: fiapgames-payments-api
       ConnectionStrings__Postgres: "Host=postgres-payments;Port=5432;Database=fiapgames-payments;Username=fiapgames-admin;Password=FiapGames@Admin123"
       RabbitMq__Host: rabbitmq
       RabbitMq__VirtualHost: "/"
@@ -118,9 +212,15 @@ services:
         condition: service_healthy
       sqlserver-users:
         condition: service_healthy
-    ports:
-      - "8083:8080"
+    # Não publicada: acesso pelo gateway (:8000/api/users).
+    # Valida JWT no próprio código (AddJwtBearer no Program.cs) — dá 401 mesmo
+    # quando acessado direto, igual ao CatalogAPI. Fechado ainda assim, para o
+    # compose ter uma porta de entrada só.
+    # ports:
+    #   - "8083:8080"
     environment:
+      <<: *newrelic-agent
+      NEW_RELIC_APP_NAME: fiapgames-users-api
       ConnectionStrings__SqlServer: "Server=sqlserver-users,1433;Database=UserGamesFiap;User Id=sa;Password=RootPassword123!;TrustServerCertificate=True;Encrypt=False"
       RabbitMq__HostName: rabbitmq
       RabbitMq__Port: "5672"
@@ -132,8 +232,229 @@ services:
       Notifications__BaseUrl: "https://fiap-games-notification-hdaza0g6fudjc3ak.westus3-01.azurewebsites.net"
       Notifications__FunctionKey: "${NOTIFICATIONS_FUNCTION_KEY}"
 
+  # ===========================================================================
+  # API GATEWAY (Kong) — a única porta de entrada do sistema
+  #
+  # Rotas, validação de JWT e políticas vivem em kong/kong.compose.yml, não aqui.
+  # O equivalente no Kubernetes está em k8s/kong/ (veja o README).
+  #
+  # Portas novas: 8000 (proxy), 8001 (Admin API), 8002 (Kong Manager),
+  # 8100 (status/metrics), 1337 (Konga). Nenhuma colide com as já usadas.
+  # ===========================================================================
+
+  # Banco PRÓPRIO do gateway, separado dos postgres:16 do Payments/Notifications.
+  # A versão 11.16 é fixada de propósito: o Konga usa um driver sails-postgresql
+  # antigo que quebra em Postgres moderno. NÃO atualizar.
+  postgres-kong:
+    image: postgres:11.16
+    container_name: fiapgames-kong-postgres
+    environment:
+      POSTGRES_USER: kong
+      POSTGRES_PASSWORD: kong
+      POSTGRES_DB: kong
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kong"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      # Cria a base `konga` no primeiro start (o Kong usa a base `kong`).
+      - ./kong/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - postgres-kong-data:/var/lib/postgresql/data
+
+  # Roda uma vez: cria o schema do Kong e carrega a config declarativa versionada.
+  # O Kong roda em modo banco (e não DB-less) porque Konga e Kong Manager editam
+  # via Admin API, e em DB-less essa API é read-only (405). O db_import reconcilia
+  # isso com o requisito de ter a config versionada no repositório.
+  kong-bootstrap:
+    image: kong:3.9
+    container_name: fiapgames-kong-bootstrap
+    depends_on:
+      postgres-kong:
+        condition: service_healthy
+    environment:
+      KONG_DATABASE: postgres
+      KONG_PG_HOST: postgres-kong
+      KONG_PG_PORT: "5432"
+      KONG_PG_DATABASE: kong
+      KONG_PG_USER: kong
+      KONG_PG_PASSWORD: kong
+      # Usada só pelo `sed` abaixo, para substituir o placeholder <NEW_RELIC_LICENSE_KEY>
+      # dentro do container. kong/kong.compose.yml (o arquivo no disco/git) nunca é
+      # reescrito — a chave real não fica versionada.
+      NEW_RELIC_LICENSE_KEY: "${NEW_RELIC_LICENSE_KEY:-}"
+    volumes:
+      # Montado como .template — o arquivo real, com o placeholder substituído, vai
+      # para /tmp dentro do container (fora do bind mount, que é somente leitura).
+      - ./kong/kong.compose.yml:/kong/kong.yml.template:ro
+    # Tudo num único elemento: `sh -c` trata só o PRIMEIRO argumento depois do -c
+    # como script (o resto vira $0, $1...). Separar em `entrypoint` + `command` faria
+    # o Compose quebrar a string em palavras e rodar apenas `kong`, que imprime o help.
+    # "$$" (escapado) é necessário: sem isso o PRÓPRIO Compose tentaria interpolar
+    # $NEW_RELIC_LICENSE_KEY ao ler este arquivo, antes mesmo do container existir.
+    #
+    # `:-license-key-not-configured` NÃO é decoração. Medido diretamente: sem chave
+    # configurada (o .env.example de fábrica tem NEW_RELIC_LICENSE_KEY vazio), a
+    # substituição vira uma string VAZIA, e `kong config db_import` falha a validação
+    # de schema do próprio Kong — o campo `headers` do `http-log`/`opentelemetry`
+    # exige valor com pelo menos 1 caractere. Isso não é uma falha isolada desses
+    # dois plugins: ela aborta o import inteiro, e nenhum service/route/plugin de
+    # JWT carrega — o gateway inteiro fica sem configuração nenhuma. Um fallback
+    # não-vazio mantém o placeholder substituído por lixo (a New Relic ainda
+    # rejeita com 401/403 em runtime) em vez de vazio, satisfazendo o schema e
+    # deixando roteamento/JWT/rate-limiting carregarem normalmente mesmo sem a
+    # New Relic configurada.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        sed "s|<NEW_RELIC_LICENSE_KEY>|$${NEW_RELIC_LICENSE_KEY:-license-key-not-configured}|g"
+        /kong/kong.yml.template > /tmp/kong.yml &&
+        kong migrations bootstrap &&
+        kong config db_import /tmp/kong.yml
+    restart: on-failure
+
+  kong:
+    image: kong:3.9
+    container_name: fiapgames-kong
+    depends_on:
+      kong-bootstrap:
+        condition: service_completed_successfully
+    ports:
+      - "8000:8000"   # proxy — o único endereço que os clientes devem usar
+      - "8001:8001"   # Admin API
+      - "8002:8002"   # Kong Manager (GUI oficial embutida na imagem)
+      - "8100:8100"   # status + /metrics do plugin prometheus
+    environment:
+      KONG_DATABASE: postgres
+      KONG_PG_HOST: postgres-kong
+      KONG_PG_PORT: "5432"
+      KONG_PG_DATABASE: kong
+      KONG_PG_USER: kong
+      KONG_PG_PASSWORD: kong
+      KONG_PROXY_LISTEN: 0.0.0.0:8000
+      KONG_ADMIN_LISTEN: 0.0.0.0:8001
+      KONG_ADMIN_GUI_LISTEN: 0.0.0.0:8002
+      KONG_ADMIN_GUI_URL: http://localhost:8002
+      # Obrigatório: o Kong Manager roda NO NAVEGADOR e chama a Admin API de lá,
+      # então precisa do endereço visto do host. Sem isso a tela sobe vazia.
+      KONG_ADMIN_GUI_API_URL: http://localhost:8001
+      KONG_STATUS_LISTEN: 0.0.0.0:8100
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_ACCESS_LOG: /dev/stdout
+      KONG_ADMIN_ERROR_LOG: /dev/stderr
+      KONG_NGINX_WORKER_PROCESSES: "1"
+      # Tracing do Kong. O default `off` mantém o comportamento atual: o plugin
+      # opentelemetry, mesmo descomentado, não gera span nenhum sem isto.
+      # Para ligar, ponha KONG_TRACING_INSTRUMENTATIONS=all e SAMPLING_RATE=1.0
+      # no .env — sampling 1.0 captura 100%, ótimo para demo, caro em produção.
+      KONG_TRACING_INSTRUMENTATIONS: "${KONG_TRACING_INSTRUMENTATIONS:-off}"
+      KONG_TRACING_SAMPLING_RATE: "${KONG_TRACING_SAMPLING_RATE:-0}"
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Cria as tabelas do próprio Konga na base `konga`.
+  konga-prepare:
+    image: pantsel/konga:latest
+    container_name: fiapgames-konga-prepare
+    depends_on:
+      postgres-kong:
+        condition: service_healthy
+    command: ["-c", "prepare", "-a", "postgres", "-u", "postgresql://kong:kong@postgres-kong:5432/konga"]
+    restart: on-failure
+
+  # Konga está ARQUIVADO upstream e seu suporte oficial vai até Kong 2.x. Está aqui
+  # por orientação da aula. Se alguma tela quebrar com Kong 3.x, o Kong Manager em
+  # http://localhost:8002 cobre a mesma função e é mantido.
+  # No primeiro acesso: criar o usuário admin na tela, depois cadastrar uma
+  # Connection apontando para http://kong:8001
+  konga:
+    image: pantsel/konga:latest
+    container_name: fiapgames-konga
+    depends_on:
+      konga-prepare:
+        condition: service_completed_successfully
+    ports:
+      - "1337:1337"
+    environment:
+      DB_ADAPTER: postgres
+      DB_HOST: postgres-kong
+      DB_PORT: "5432"
+      DB_DATABASE: konga
+      DB_USER: kong
+      DB_PASSWORD: kong
+      NODE_ENV: production
+      # Assina as sessões do próprio Konga (login dele, não o JWT do gateway).
+      TOKEN_SECRET: konga
+
+  # Registra o admin da Konga (credenciais fixas de dev) e cria automaticamente
+  # a Connection apontando para o Kong local — sem isso, seria preciso abrir
+  # http://localhost:1337, cadastrar o usuário manualmente e clicar para ativar
+  # a connection toda vez que o volume for recriado.
+  #
+  # Descoberto testando ao vivo (nada disso está documentado no projeto Konga,
+  # que está arquivado): (1) POST /register é idempotente na prática — se já
+  # existe um admin, apenas re-renderiza a página com "already registered" e
+  # HTTP 200, não falha o container. (2) A Connection não tem endpoint HTTP
+  # simples de criação, vive só na tabela konga_kong_nodes — inserida via SQL.
+  # (3) A connection "ativa" para um usuário NÃO é konga_kong_nodes.active —
+  # é o campo konga_users.node (FK), lido do login e cacheado no localStorage
+  # do navegador. Sem setá-lo, o menu "API GATEWAY" fica escondido mesmo com
+  # uma Connection já existindo, e quem já estava logado só vê a mudança após
+  # deslogar e logar de novo.
+  konga-register:
+    image: busybox:1.36
+    container_name: fiapgames-konga-register
+    depends_on:
+      konga:
+        condition: service_started
+    # Credenciais de dev fixas — mesma convenção já usada no resto do projeto
+    # (RabbitMQ/Postgres/SQL Server). Login próprio da Konga, sem relação
+    # nenhuma com o JWT do gateway.
+    entrypoint:
+      - sh
+      - -c
+      - |
+        until wget -q --spider http://konga:1337; do
+          echo "waiting for konga..."
+          sleep 2
+        done
+        wget -q -O /dev/null --header 'Content-Type: application/json' \
+          --post-data '{"username":"admin","email":"admin@fiapgames.local","password":"FiapGames@Admin123","password_confirmation":"FiapGames@Admin123"}' \
+          http://konga:1337/register || true
+    restart: on-failure
+
+  konga-connect:
+    image: postgres:11.16
+    container_name: fiapgames-konga-connect
+    depends_on:
+      konga-register:
+        condition: service_completed_successfully
+    environment:
+      PGPASSWORD: kong
+    entrypoint:
+      - sh
+      - -c
+      - |
+        psql -h postgres-kong -U kong -d konga -v ON_ERROR_STOP=1 -c "
+          INSERT INTO konga_kong_nodes (name, kong_admin_url, kong_api_key, kong_version, active, health_checks, \"createdAt\", \"updatedAt\")
+          SELECT 'fiapgames', 'http://kong:8001', '', '3.0.0', true, false, now(), now()
+          WHERE NOT EXISTS (SELECT 1 FROM konga_kong_nodes);
+
+          UPDATE konga_users SET node = (SELECT id FROM konga_kong_nodes ORDER BY id LIMIT 1)
+          WHERE admin = true AND node IS NULL;
+        "
+    restart: on-failure
+
 volumes:
   rabbitmq-data:
   sqlserver-catalog-data:
   postgres-payments-data:
   sqlserver-users-data:
+  postgres-kong-data:
+  mongodb-data:
+  redis-data:

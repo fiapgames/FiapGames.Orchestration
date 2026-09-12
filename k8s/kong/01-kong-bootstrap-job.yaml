@@ -1,0 +1,130 @@
+# Prepares the Kong database: creates the schema, then loads the versioned
+# declarative config into it.
+#
+# Ordering is guaranteed WITHOUT any external orchestration by leaning on the fact
+# that initContainers run strictly in sequence:
+#   1. wait-for-postgres-kong  -> the database is accepting connections
+#   2. migrations              -> `kong migrations bootstrap` creates the schema
+#   3. seed (main container)   -> `kong config db_import` loads kong/kong.k8s.yml
+#
+# Why db_import at all? Konga and Kong Manager administer Kong through the Admin
+# API, and in DB-less mode that API is read-only (405 on POST/PUT/PATCH/DELETE).
+# So Kong runs in DB mode — but the Tech Challenge requires the gateway config to
+# be versioned in this repo. db_import reconciles both: kong/kong.k8s.yml stays the
+# source of truth and this Job pushes it into the database.
+#
+# Both steps are idempotent, verified by running the seed twice against the same
+# database: `migrations bootstrap` reports "Database already bootstrapped" and exits
+# 0, and `config db_import` re-imports cleanly.
+#
+# That second part only holds because kong/kong.k8s.yml pins an explicit `id` on the
+# jwt credential. db_import upserts entities that have a natural key (`name` on
+# services and routes, `username` on consumers), but a jwt_secret has none — without
+# a fixed id Kong mints a new UUID every run and the second import dies with
+# "UNIQUE violation detected on '{key=\"User.Games.Fiap\"}'".
+#
+# db_import never DELETES: an entity removed from the file stays in the database.
+# To wipe and reload, delete this Job and the postgres-kong pod (see README).
+#
+# The `kong-declarative-config` Secret is NOT a manifest in this folder — it is
+# generated straight from the canonical file so the content is never duplicated:
+#
+#   kubectl create secret generic kong-declarative-config -n fiapgames \
+#     --from-file=kong.yml.template=kong/kong.k8s.yml --dry-run=client -o yaml | kubectl apply -f -
+#
+# Until that Secret exists this Job's pod stays in ContainerCreating.
+#
+# kong/kong.k8s.yml carries a literal placeholder, <NEW_RELIC_LICENSE_KEY>, inside
+# the http-log and opentelemetry plugin configs (see kong/NEWRELIC.md). The `seed`
+# container substitutes it with `sed`, reading the real value from the `newrelic`
+# Secret, and writes the result to a scratch emptyDir — never back onto the
+# read-only Secret volume, and never into this repository. The secretKeyRef is
+# `optional: true` on purpose: with no `newrelic` Secret created (the out-of-the-box
+# state), the env var is simply absent, `sed` substitutes the placeholder with an
+# empty string, and `db_import` still succeeds — New Relic just never receives
+# anything with a blank key. Observability stays fully opt-in.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kong-bootstrap
+  namespace: fiapgames
+  labels:
+    app: kong-bootstrap
+spec:
+  backoffLimit: 4
+  template:
+    metadata:
+      # Deliberately NOT `app: kong` — that is the selector of the kong Service,
+      # so this short-lived pod would be picked up as a proxy endpoint while it
+      # runs and requests routed to it would be refused.
+      labels:
+        app: kong-bootstrap
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        - name: wait-for-postgres-kong
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z -w 2 postgres-kong.fiapgames.svc.cluster.local 5432; do
+                echo "waiting for postgres-kong..."
+                sleep 2
+              done
+        - name: migrations
+          image: kong:3.9
+          # Passed to the image's own entrypoint (/docker-entrypoint.sh), which
+          # does the prefix setup before exec'ing the kong CLI.
+          args: ["kong", "migrations", "bootstrap"]
+          envFrom:
+            - configMapRef:
+                name: kong-db-config
+      containers:
+        - name: seed
+          image: kong:3.9
+          # Overrides the image's default entrypoint (a thin wrapper around the
+          # kong CLI) to run the sed substitution first. No dependency lost: the
+          # docker-compose equivalent proved `kong migrations`/`config db_import`
+          # work fine invoked directly, without that wrapper script.
+          command: ["/bin/sh", "-c"]
+          # `:-license-key-not-configured` is NOT decoration. Measured directly: with
+          # the `newrelic` Secret absent (the out-of-the-box state), the env var below
+          # is unset, a bare `${NEW_RELIC_LICENSE_KEY}` substitutes an EMPTY string,
+          # and `kong config db_import` then fails Kong's own plugin schema validation
+          # — `http-log`/`opentelemetry`'s `headers` field requires each value to be
+          # at least 1 character. That is not a soft failure of those two plugins: it
+          # aborts the WHOLE import, so no service, route, or JWT plugin loads either —
+          # the entire gateway stays unconfigured. A non-empty fallback keeps the
+          # placeholder replaced with garbage (New Relic still rejects it with
+          # 401/403 at runtime) instead of blank, so the schema is satisfied and
+          # routing/JWT/rate-limiting load normally regardless of New Relic being set up.
+          args:
+            - |
+              sed "s|<NEW_RELIC_LICENSE_KEY>|${NEW_RELIC_LICENSE_KEY:-license-key-not-configured}|g" \
+                /kong/declarative/kong.yml.template > /tmp/kong.yml
+              kong config db_import /tmp/kong.yml
+          envFrom:
+            - configMapRef:
+                name: kong-db-config
+          env:
+            - name: NEW_RELIC_LICENSE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: newrelic
+                  key: license-key
+                  optional: true
+          volumeMounts:
+            - name: declarative-config
+              mountPath: /kong/declarative
+              readOnly: true
+            - name: scratch
+              mountPath: /tmp
+      volumes:
+        - name: declarative-config
+          secret:
+            secretName: kong-declarative-config
+        # Writable location for the substituted file — the Secret mount above is
+        # read-only, so the sed output can't land back on top of it.
+        - name: scratch
+          emptyDir: {}

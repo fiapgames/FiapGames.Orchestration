@@ -1,0 +1,25 @@
+# Kong -> Postgres connection settings, shared by the bootstrap Job and the Kong
+# Deployment so the two can never drift apart.
+#
+# Numbered 00 because `kubectl apply -f k8s/kong/` applies files in ALPHABETICAL
+# order, and both consumers of this ConfigMap must find it already present. This is
+# the same ordering gotcha the README documents for mailhog.yaml vs namespace.yaml.
+#
+# The password sits in a ConfigMap rather than a Secret to match what this repo
+# already does for infrastructure — rabbitmq.yaml, postgres.yaml, sqlserver.yaml and
+# postgres-kong.yaml all carry their credentials as plain `env:` values. It is a
+# throwaway local credential for a kind cluster, not a real one.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kong-db-config
+  namespace: fiapgames
+  labels:
+    app: kong
+data:
+  KONG_DATABASE: "postgres"
+  KONG_PG_HOST: "postgres-kong.fiapgames.svc.cluster.local"
+  KONG_PG_PORT: "5432"
+  KONG_PG_DATABASE: "kong"
+  KONG_PG_USER: "kong"
+  KONG_PG_PASSWORD: "kong"

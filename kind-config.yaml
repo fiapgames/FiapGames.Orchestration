@@ -1,0 +1,44 @@
+# Kind cluster config — publishes the gateway's NodePorts on the host.
+#
+# Without extraPortMappings a NodePort is NOT reachable from the host on Docker
+# Desktop / Windows. That is exactly why the orphan `nodePort: 30080` on
+# catalog-api never worked and the README fell back to `kubectl port-forward`.
+#
+# With this file the gateway is reachable natively, no background port-forward
+# process to keep alive:
+#
+#   kind create cluster --config kind-config.yaml
+#
+# Lives at the repo root, NOT in k8s/, on purpose: `kubectl apply -f k8s/` would
+# try to apply this as a Kubernetes object and fail — `kind: Cluster` on
+# kind.x-k8s.io is a kind config, not a cluster resource.
+#
+# Only the gateway's ports are published — everything else stays internal to the
+# cluster, which is what makes Kong the single entry point.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: fiapgames
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      # Kong proxy — the single entry point for the whole system
+      - containerPort: 30000
+        hostPort: 8000
+        protocol: TCP
+      # Kong Admin API — needed on the host because Kong Manager runs in the
+      # browser and calls the Admin API from there (KONG_ADMIN_GUI_API_URL)
+      - containerPort: 30001
+        hostPort: 8001
+        protocol: TCP
+      # Kong Manager (official OSS admin GUI, bundled in the kong image)
+      - containerPort: 30002
+        hostPort: 8002
+        protocol: TCP
+      # Kong status endpoint + Prometheus /metrics
+      - containerPort: 30100
+        hostPort: 8100
+        protocol: TCP
+      # Konga (community admin GUI)
+      - containerPort: 31337
+        hostPort: 1337
+        protocol: TCP

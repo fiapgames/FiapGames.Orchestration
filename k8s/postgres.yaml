@@ -1,6 +1,10 @@
-# Single shared Postgres instance used by both Payments and Notifications
-# (matches the hostname their k8s Secrets already reference: postgres.fiapgames.svc.cluster.local).
+# Postgres instance used by Payments (matches the hostname its k8s Secret
+# already references: postgres.fiapgames.svc.cluster.local).
 # The init script creates one database per service on first startup.
+#
+# Notifications used to share this instance too, before it became serverless
+# (Azure Function) — its database was removed from POSTGRES_MULTIPLE_DATABASES
+# below since nothing reads it anymore.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -54,7 +58,7 @@ spec:
             - name: POSTGRES_PASSWORD
               value: "FiapGames@Admin123"
             - name: POSTGRES_MULTIPLE_DATABASES
-              value: "fiapgames-payments,fiapgames-notifications"
+              value: "fiapgames-payments"
           ports:
             - containerPort: 5432
           readinessProbe:
