@@ -94,6 +94,43 @@ services:
     volumes:
       - sqlserver-users-data:/var/opt/mssql
 
+  # Persistência poliglota do Catalog (item 4 do Tech Challenge): histórico de
+  # eventos de compra (append-only, sem join, sem migration no SQL Server).
+  mongodb:
+    image: mongo:7
+    container_name: fiapgames-catalog-mongo
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: fiapgames-admin
+      MONGO_INITDB_ROOT_PASSWORD: FiapGames@Admin123
+    ports:
+      - "27017:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - mongodb-data:/data/db
+
+  # Cache distribuído do Catalog (item 4 do Tech Challenge): resultados de
+  # consultas onerosas (catálogo de jogos, biblioteca do usuário). Sem senha —
+  # é cache, não fonte de verdade — por isso a connection string vive no
+  # ConfigMap/environment, não num Secret.
+  redis:
+    image: redis:7-alpine
+    container_name: fiapgames-redis
+    ports:
+      # 6380 no host: a 6379 já está em uso por outro projeto nesta máquina.
+      # Comunicação entre containers usa sempre a porta interna (redis:6379).
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - redis-data:/data
+
   catalog-api:
     build:
       context: ../FiapGames.Catalog
@@ -103,6 +140,10 @@ services:
       rabbitmq:
         condition: service_healthy
       sqlserver-catalog:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     # Porta NÃO publicada: o Kong (:8000) é a única porta de entrada.
     #
@@ -130,6 +171,8 @@ services:
       RabbitMq__UserName: fiapgames-admin
       RabbitMq__Password: FiapGames@Admin123
       Jwt__SecretKey: "dev-only-change-this-secret-key-32-bytes-minimum"
+      ConnectionStrings__Mongo: "mongodb://fiapgames-admin:FiapGames%40Admin123@mongodb:27017"
+      Redis__Connection: "redis:6379"
 
   payments-api:
     build:
@@ -413,3 +456,5 @@ volumes:
   postgres-payments-data:
   sqlserver-users-data:
   postgres-kong-data:
+  mongodb-data:
+  redis-data:

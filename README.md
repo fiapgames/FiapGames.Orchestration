@@ -34,7 +34,9 @@ FiapGames.Orchestration/
     ├── rabbitmq.yaml           \
     ├── postgres.yaml            |  infraestrutura compartilhada
     ├── sqlserver.yaml           |  (os repos dos microsserviços não trazem isso)
-    ├── sqlserver-users.yaml     /
+    ├── sqlserver-users.yaml     |
+    ├── mongodb.yaml             |  histórico de compras do Catalog (item 4 do Tech Challenge)
+    ├── redis.yaml               /  cache distribuído do Catalog (idem)
     ├── payments-api-service.yaml   Service do Payments (o repo dele só traz Deployment)
     ├── postgres-kong.yaml      banco PRÓPRIO do gateway (postgres:11.16)
     ├── kong/                   manifestos do gateway (prefixo numérico = ordem de apply)
@@ -56,14 +58,16 @@ FiapGames.Orchestration/
 | `sqlserver-catalog` | 1433 | — |
 | `sqlserver-users` | 1434 | — |
 | `postgres-payments` | 5432 | — |
-| `catalog-api` | 8080 | rabbitmq, sqlserver-catalog |
-| `payments-api` | 8081 | rabbitmq, postgres-payments |
-| `users-api` | 8083 | rabbitmq, sqlserver-users |
+| `mongodb` | 27017 | — |
+| `redis` | 6380 (host) → 6379 (container) | — |
+| `catalog-api` | — (só pelo gateway) | rabbitmq, sqlserver-catalog, mongodb, redis |
+| `payments-api` | — (só pelo gateway) | rabbitmq, postgres-payments |
+| `users-api` | — (só pelo gateway) | rabbitmq, sqlserver-users |
 | `postgres-kong` | — (só interno) | — |
 | `kong` | **8000** (proxy), 8001 (Admin API), 8002 (Kong Manager), 8100 (status/métricas) | postgres-kong |
 | `konga` | 1337 | postgres-kong, kong |
 
-> As portas 8080–8083 continuam publicadas para debug, mas **o endereço de uso normal é `http://localhost:8000`** — o gateway. Bater direto em 8080 contorna a validação de JWT.
+> As portas das três APIs **não** são publicadas no host — só `http://localhost:8000` (o gateway) e as portas administrativas acima. Ver [O que o bypass revelou](#o-que-o-bypass-revelou).
 
 ## API Gateway (Kong)
 
@@ -88,7 +92,7 @@ Roteamento **passthrough**: os paths originais de cada serviço são preservados
 
 A rota `users-preflight` e o `OPTIONS` em `catalog-health` existem porque as demais rotas do Users restringem `methods` — sem elas o preflight do navegador tomava 404 e o **login do front não funcionava**. Detalhes em [CORS e o preflight](#cors-e-o-preflight--a-parte-mais-fácil-de-errar).
 
-As três rotas de `POST /api/users*` são públicas por necessidade: são elas que criam a conta e emitem o token — protegê-las seria um problema de galinha e ovo. Todo o resto do Catalog é protegido, e isso **fecha um buraco real**: o CatalogAPI não tem `AddAuthentication` nem `[Authorize]` em lugar nenhum do código, então até agora `POST /games/{id}/purchase` estava aberto para qualquer um. O gateway é o único ponto de enforcement.
+As três rotas de `POST /api/users*` são públicas por necessidade: são elas que criam a conta e emitem o token — protegê-las seria um problema de galinha e ovo. Todo o resto do Catalog é protegido pelo gateway — e, desde que o CatalogAPI passou a validar o próprio JWT (`AddAuthentication`/`[Authorize]`, ver [O que o bypass revelou](#o-que-o-bypass-revelou)), também pela própria API: dupla camada, não só o gateway.
 
 ### Políticas ativas
 
@@ -117,7 +121,7 @@ Três detalhes que **não são opcionais** e são fáceis de errar:
 - `run_on_preflight: false` — o default é `true`, e aí o preflight `OPTIONS` do navegador (que não leva `Authorization`) tomaria 401 e todas as chamadas do front quebrariam.
 - `limit_by: ip` — o default é `consumer`, e como existe um único `jwt_secret`, *todos* os usuários logados viram o mesmo consumer: o rate limit seria um balde global em vez de por cliente.
 
-O plugin `jwt` do Kong **não valida `aud`**. O UsersAPI continua validando por conta própria (`ValidateAudience = true`); o Catalog não valida nada — para ele o gateway é a única barreira.
+O plugin `jwt` do Kong **não valida `aud`**. UsersAPI e CatalogAPI validam por conta própria (`ValidateAudience = true` em ambos) — o Kong garante assinatura e expiração, os serviços garantem o resto.
 
 ### Por que modo banco (e não DB-less)
 
@@ -212,15 +216,26 @@ Vale registrar porque explica uma decisão do `docker-compose.yml`. Enquanto as 
 | `POST /games/{id}/purchase` | **401** | `:8080` → **202, compra feita** |
 | `GET /api/users` | **401** | `:8083` → **401** |
 
-Duas conclusões:
+Na época, duas conclusões:
 
-**O UsersAPI se defende sozinho.** Dá 401 mesmo furando o gateway, porque valida JWT no próprio código (`AddJwtBearer` no `Program.cs`). É defesa em profundidade real — o gateway valida, e o serviço valida de novo.
+**O UsersAPI se defendia sozinho.** Dava 401 mesmo furando o gateway, porque valida JWT no próprio código (`AddJwtBearer` no `Program.cs`). Defesa em profundidade real — o gateway valida, e o serviço valida de novo.
 
-**O CatalogAPI não tem defesa alguma.** Sem `AddAuthentication`, sem `[Authorize]`: o gateway é a **única** barreira. Contorná-lo dava acesso total, inclusive comprar sem estar autenticado.
+**O CatalogAPI não tinha defesa alguma.** Sem `AddAuthentication`, sem `[Authorize]`: o gateway era a **única** barreira. Contorná-lo dava acesso total, inclusive comprar sem estar autenticado.
 
-Por isso as portas 8080–8083 foram comentadas no compose. O Kubernetes já estava correto — o `kind-config.yaml` publica só as portas do gateway, então `catalog-api` e `user-api` nunca foram alcançáveis do host. Agora os dois ambientes têm a mesma postura.
+Por isso as portas 8080–8083 foram comentadas no compose. O Kubernetes já estava correto — o `kind-config.yaml` publica só as portas do gateway, então `catalog-api` e `user-api` nunca foram alcançáveis do host. Isso fechou o acesso **a partir do host**, mas não o acesso **de dentro da rede** — outro container no mesmo `docker network` (ou outro pod no mesmo cluster) continuava alcançando `catalog-api:8080` direto, sem o Kong no meio, porque o serviço não validava nada por conta própria.
 
-> A correção de fundo seria o CatalogAPI validar JWT também, em vez de depender só da borda. Isso é mudança no repo do Catalog, fora do escopo desta entrega — mas é a recomendação.
+**Isso foi corrigido.** O CatalogAPI agora tem seu próprio `AddAuthentication`/`AddJwtBearer` (mesmo `Jwt:Issuer`/`Jwt:SecretKey` que o Kong já valida no consumer `User.Games.Fiap` — nenhuma mudança na configuração do Kong foi necessária) e `[Authorize]` em `GamesController`, `OrdersController` e `LibraryController`; só `/health` continua público, porque probes de liveness/readiness (Docker/Kubernetes) e o próprio Kong precisam alcançá-lo sem token. Reconferido direto na rede interna do compose, contornando o Kong:
+
+| Request sem token, direto em `catalog-api:8080` | Antes | Agora |
+|---|---|---|
+| `GET /health` | 200 | 200 (continua público, de propósito) |
+| `GET /games` | 200 | **401** |
+| `GET /orders` | 200 | **401** |
+| `POST /games/{id}/purchase` | 202, compra feita | **401** |
+
+O fluxo legítimo (registro → login → criar jogo → comprar → biblioteca), todo passando pelo Kong com um token válido, continua funcionando normalmente — reconferido de ponta a ponta depois da mudança.
+
+O PaymentsAPI **não** recebeu o mesmo tratamento: sua única rota HTTP é `GET /health` (o resto é só consumidor de RabbitMQ), então não existe endpoint de negócio para proteger — colocar `[Authorize]` ali não fecharia bypass nenhum, só complicaria o health check.
 
 ### Observabilidade
 
@@ -275,6 +290,40 @@ O ponto que não é óbvio: **o `PaymentProcessedEvent` continua sendo publicado
 Os dois `NotificationsClient` (Users e Payments) seguem o mesmo desenho: `HttpClient` nomeado com `AddHttpClient<INotificationsClient, NotificationsClient>`, header `x-functions-key` com a chave (`Notifications__FunctionKey`), e um try/catch que rebaixa falha de notificação a `LogWarning` — porque notificação é acessória, não pode derrubar cadastro nem processamento de pagamento.
 
 **Consequência de a Function não estar em código no disco:** ela existe só deployada no Azure (`fiap-games-notification`, resource group `fiap-games`, região `westus3`). O contrato (`/api/notifications/user-created`, `/api/notifications/payment-processed`, ambos retornando `202 Accepted`) foi descoberto testando diretamente com a chave, não lendo código-fonte.
+
+## Persistência poliglota e cache (MongoDB + Redis)
+
+Item 4 do Tech Challenge (obrigatório): NoSQL para dados de alta volumetria/flexíveis e cache distribuído para consultas onerosas. Os dois vivem só no **Catalog** — é o único serviço com superfície de leitura real (o Payments só tem `/health`).
+
+### MongoDB — histórico de eventos de compra
+
+Cada compra gera de 2 a 3 documentos append-only na coleção `purchase_events` (banco `fiapgames-catalog-history`), um por evento de negócio:
+
+| `eventType` | Quando | Quem grava |
+|---|---|---|
+| `OrderPlaced` | pedido criado | `PurchaseService`, logo após publicar `OrderPlacedEvent` |
+| `PaymentApproved` / `PaymentRejected` | pagamento processado | `PaymentProcessedConsumer` |
+| `GameGranted` | jogo entra na biblioteca (só quando aprovado) | `PaymentProcessedConsumer` |
+
+Consultável por `GET /orders/{id}/history`, protegido pelo mesmo `[Authorize]` do `OrdersController` — não precisou de rota nova no Kong, a rota `catalog-orders` já casa `/orders` por prefixo. Exposto no front na própria página do pedido (timeline abaixo do status).
+
+Por que log de eventos e não catálogo de jogos ou reviews (os outros exemplos do enunciado): é o único caso onde os pontos de escrita **já existiam** (`PurchaseService` e `PaymentProcessedConsumer` já processam esses dois eventos), é puramente append-only — sem join, sem update — e não encosta em nada do SQL Server (zero migration, zero FK, zero risco pro fluxo de compra).
+
+A escrita do histórico nunca pode derrubar a compra — está sempre em try/catch com `LogWarning`, mesmo princípio já usado no `NotificationsClient`. Isso foi testado de verdade, não é só intenção: um bug real do driver (ver abaixo) fez a escrita falhar silenciosamente algumas vezes durante o desenvolvimento, e o pedido continuou sendo aprovado/rejeitado normalmente — só o histórico daquela compra específica ficou incompleto.
+
+> **Achado real, não teórico, sobre `MongoDB.Driver` 3.x e `Guid`:** o driver não tem mais uma representação default para `Guid` — serializar ou filtrar por um `Guid` sem configurar isso lança `GuidSerializer cannot serialize a Guid when GuidRepresentation is Unspecified`. E não dá pra registrar um serializer global (`BsonSerializer.RegisterSerializer`) para corrigir, porque o próprio driver já registra o dele (`Unspecified`) assim que toca o Mongo pela primeira vez — a segunda tentativa lança `There is already a serializer registered for type Guid`. A correção usada foi um `BsonClassMap` específico para `PurchaseEvent`, mapeando `Guid` como `BsonType.String`. E tem uma segunda pegadinha: esse mapeamento precisa rodar **antes de qualquer código tocar o Mongo** — inclusive antes da criação do índice no startup. `PurchaseHistoryStore.CollectionName` é `const`, e ler um `const` **não** dispara o construtor estático da classe (é inlined em tempo de compilação); dependar disso pra registrar o mapeamento fazia o índice ser criado primeiro, cristalizando o serializer default antes do mapeamento correto existir. A correção: `PurchaseHistoryStore.RegisterSerializers()` é chamado explicitamente no `Program.cs`, antes até do `new MongoClient(...)`.
+
+### Redis — cache das consultas caras
+
+| Chave | Endpoint | TTL | Invalidado por |
+|---|---|---|---|
+| `catalog:games:all` | `GET /games` | 5 min | criar/editar/desativar jogo |
+| `catalog:game:{id}` | `GET /games/{id}` | 5 min | editar/desativar aquele jogo |
+| `catalog:library:{userId}` | `GET /library/{userId}` | 2 min | `PaymentProcessedConsumer`, quando libera um jogo novo |
+
+O ganho real está na biblioteca: sem cache, cada chamada faz um **RPC síncrono no RabbitMQ** (`IRequestClient<UserLookupRequested>`, timeout de 5s) para confirmar que o usuário existe, antes de tocar no SQL Server. Medido neste ambiente: **~1.4s no miss, ~0.07s no hit** — o hit não faz RPC nenhum, só lê do Redis.
+
+`GET /orders` e `GET /orders/{id}` **não são cacheados de propósito** — o front repolla `/orders/{id}` a cada 2s enquanto o pedido está `Pending` (ver `useOrders.ts`), esperando o status virar `Approved`/`Rejected`. Cachear aí faria a tela travar em "Pendente" pelo TTL inteiro.
 
 ## Observabilidade (New Relic)
 
@@ -336,9 +385,9 @@ No Kubernetes o agente dos microsserviços entra por `kubectl patch`, no mesmo p
 
 ### O ponto cego que isso fecha
 
-O gateway barra na **borda**, não por dentro. Medido: de dentro da rede Docker, `GET http://catalog-api:8080/games` devolve **200 sem token**, e `POST /games/{id}/purchase` devolve **202** — porque o CatalogAPI não valida JWT no código. Esses acessos **nunca tocam o Kong**, então nenhum plugin de log do gateway os registra.
+O gateway barra na **borda**, não por dentro — de dentro da rede Docker (ou de outro pod no cluster), uma requisição a `catalog-api:8080` nunca toca o Kong, então nenhum plugin de log do gateway a registra. Isso já era verdade quando o CatalogAPI não validava JWT (o bypass **funcionava**, 200/202 sem token — ver [O que o bypass revelou](#o-que-o-bypass-revelou)), e continua verdade agora que ele passou a validar (o bypass **é barrado**, 401, mas ainda invisível para o Kong).
 
-Com o agente dentro do Catalog, eles passam a aparecer como `Transaction` em `fiapgames-catalog-api` **sem** span correspondente no gateway — a assinatura exata de um bypass. Foi o argumento decisivo para instrumentar os serviços e não só o gateway.
+Com o agente dentro do Catalog, uma tentativa de bypass aparece como `Transaction` em `fiapgames-catalog-api` **sem** span correspondente no gateway — a assinatura exata de um acesso que contornou a borda, esteja ele sendo aceito ou rejeitado pela própria API. Foi o argumento decisivo para instrumentar os serviços e não só o gateway.
 
 O Notifications não aparece na tabela porque é serverless — não há container, banco nem porta local para ele.
 
@@ -362,11 +411,11 @@ O `.env` não deve ser versionado. Sem ele, Users e Payments sobem normalmente, 
 docker compose up -d --build
 ```
 
-Isso builda a imagem de cada API a partir do Dockerfile do respectivo repositório irmão, sobe um único RabbitMQ compartilhado e o banco de cada serviço.
+Isso builda a imagem de cada API a partir do Dockerfile do respectivo repositório irmão, sobe um único RabbitMQ compartilhado, o banco de cada serviço e o Mongo/Redis do Catalog.
 
 Endpoints úteis — todos pelo gateway (`:8080`/`:8081`/`:8083` estão comentadas no compose, ver aviso logo abaixo):
 
-- Catalog: `http://localhost:8000/health` (público) | `/games`, `/orders`, `/library` (exigem token)
+- Catalog: `http://localhost:8000/health` (público) | `/games`, `/orders`, `/orders/{id}/history`, `/library` (exigem token)
 - Payments: `http://localhost:8000/payments/health`
 - Users: `http://localhost:8000/api/users` (cadastro), `/api/users/login`
 
@@ -374,10 +423,12 @@ Endpoints úteis — todos pelo gateway (`:8080`/`:8081`/`:8083` estão comentad
 - Kong Manager (GUI oficial, sem login): `http://localhost:8002`
 - Konga (GUI da comunidade): `http://localhost:1337` — **login já vem criado sozinho**, usuário `admin`, senha `FiapGames@Admin123` (ver [Duas UIs de administração](#duas-uis-de-administração))
 - Notifications (Azure): `https://fiap-games-notification-hdaza0g6fudjc3ak.westus3-01.azurewebsites.net/api/health`
+- MongoDB: `localhost:27017` (usuário `fiapgames-admin`, senha `FiapGames@Admin123`) — `docker compose exec mongodb mongosh -u fiapgames-admin -p 'FiapGames@Admin123'`
+- Redis: `localhost:6380` (porta do container é 6379; remapeada porque a 6379 costuma já estar em uso por outro projeto na máquina) — `docker compose exec redis redis-cli`
 
 **As APIs não publicam porta no host.** As portas 8080–8083 estão comentadas no `docker-compose.yml` de propósito, para que o gateway seja de fato a única entrada — igual ao que já acontecia no Kubernetes. Para debug direto (por exemplo abrir o `/swagger` do Catalog), descomente o bloco `ports:` do serviço em questão e rode `docker compose up -d <serviço>`.
 
-> Isso não é preciosismo. Medido antes de fechar: com a porta publicada, `POST http://localhost:8080/games/{id}/purchase` **comprava um jogo sem token nenhum**, porque o CatalogAPI não tem autenticação no código e o gateway era a única barreira. Detalhes na seção [O que o bypass revelou](#o-que-o-bypass-revelou).
+> Isso não é preciosismo. Medido antes de fechar: com a porta publicada, `POST http://localhost:8080/games/{id}/purchase` **comprava um jogo sem token nenhum**, porque na época o CatalogAPI não tinha autenticação no código e o gateway era a única barreira. Isso já foi corrigido (o Catalog agora valida JWT sozinho, ver [O que o bypass revelou](#o-que-o-bypass-revelou)), mas a porta segue comentada mesmo assim — o Kong continua sendo a entrada única por desenho, não só por essa lacuna específica.
 
 Antes de subir, vale validar a config declarativa do gateway sem iniciar nada:
 
@@ -506,7 +557,8 @@ Nenhum repositório de microsserviço traz manifesto de Deployment/Service para 
 kind create cluster --config kind-config.yaml
 
 # 2. sobe a infraestrutura compartilhada
-#    (namespace + rabbitmq + postgres + postgres-kong + sqlserver + sqlserver-users)
+#    (namespace + rabbitmq + postgres + postgres-kong + sqlserver + sqlserver-users
+#    + mongodb + redis — os dois últimos só o Catalog usa, item 4 do Tech Challenge)
 #    namespace.yaml precisa ir primeiro e separado: "kubectl apply -f k8s/" aplica os arquivos
 #    em ordem alfabética, e alguns deles vêm antes de "namespace.yaml" nessa ordem — sem esse
 #    apply em separado, o resto falha com "namespaces \"fiapgames\" not found"
@@ -570,7 +622,7 @@ Pronto — o gateway está em `http://localhost:8000` e é por ali que tudo deve
 
 | Endereço | O que é |
 |---|---|
-| `http://localhost:8000` | **proxy** — a API inteira (`/api/users`, `/games`, `/orders`, `/library`, `/health`) |
+| `http://localhost:8000` | **proxy** — a API inteira (`/api/users`, `/games`, `/orders`, `/orders/{id}/history`, `/library`, `/health`) |
 | `http://localhost:8002` | Kong Manager (GUI oficial, sem login) |
 | `http://localhost:1337` | Konga (GUI da comunidade) — **login já vem criado sozinho**: usuário `admin`, senha `FiapGames@Admin123` |
 | `http://localhost:8001` | Admin API do Kong |
@@ -593,7 +645,7 @@ Start-Process kubectl -ArgumentList 'port-forward -n fiapgames svc/payments-api 
 
 > O passo 7 (`imagePullPolicy: IfNotPresent`) só é necessário para teste local com Kind, porque as imagens não foram publicadas de verdade no Docker Hub ainda. Depois que as imagens forem publicadas (`docker push`) e os manifestos apontarem para um registry real, isso deixa de ser necessário — o comportamento padrão (`imagePullPolicy: Always` para tag `latest`) volta a ser o correto.
 
-**Resultado esperado** — 10 pods `1/1 Running` + 3 Jobs `Completed` (Notifications não roda mais no cluster — é serverless):
+**Resultado esperado** — 12 pods `1/1 Running` + 3 Jobs `Completed` (Notifications não roda mais no cluster — é serverless):
 
 ```
 NAME                                 READY   STATUS      RESTARTS   AGE
@@ -602,10 +654,12 @@ kong-xxxxxxxxxx-xxxxx                1/1     Running     0          2m
 kong-bootstrap-xxxxx                 0/1     Completed   0          2m
 konga-xxxxxxxxxx-xxxxx               1/1     Running     0          2m
 konga-prepare-xxxxx                  0/1     Completed   0          2m
+mongodb-xxxxxxxxxx-xxxxx             1/1     Running     0          10m
 payments-api-xxxxxxxxxx-xxxxx        1/1     Running     0          5m
 postgres-xxxxxxxxxx-xxxxx            1/1     Running     0          10m
 postgres-kong-xxxxxxxxxx-xxxxx       1/1     Running     0          10m
 rabbitmq-xxxxxxxxxx-xxxxx            1/1     Running     0          10m
+redis-xxxxxxxxxx-xxxxx               1/1     Running     0          10m
 sqlserver-xxxxxxxxxx-xxxxx           1/1     Running     0          10m
 sqlserver-users-xxxxxxxxxx-xxxxx     1/1     Running     0          10m
 user-api-xxxxxxxxxx-xxxxx            1/1     Running     0          5m
