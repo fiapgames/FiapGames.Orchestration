@@ -33,7 +33,8 @@ FiapGames.Orchestration/
 ├── ci/                         passo de deploy da pipeline (Fase 4)
 │   ├── deploy.sh               aplica os manifestos de um serviço com a imagem nova (EKS e Kind)
 │   ├── idle-check.sh           mede se o ambiente está ocioso (desligamento automático)
-│   └── services.sh             lista dos microsserviços, usada pelos scripts
+│   ├── services.sh             lista dos microsserviços, usada pelos scripts
+│   └── simulate-pipeline.sh    roda os passos do workflow localmente, contra o Kind
 ├── infra/                      infraestrutura da AWS (Fase 4)
 │   ├── aws.sh                  lint / plan / up / down / idle-check / keep-alive / outputs / destroy
 │   └── cloudformation/         uma stack por template, na ordem do prefixo
@@ -646,6 +647,44 @@ kubectl delete pod os-tunnel -n fiapgames
 ```
 
 **Load balancer do Kong.** O `Service` `kong-proxy` (`type: LoadBalancer`) faz o EKS criar um load balancer na AWS sozinho, sem Helm nem controller extra. O `down` apaga esse Service antes das stacks, porque o load balancer não pertence a nenhuma delas e travaria a remoção da VPC.
+
+## Pipeline de CI/CD (GitHub Actions)
+
+O workflow fica em `.github/workflows/ci-cd.yml` do **Users** e do **Catalog**, os dois serviços que o enunciado exige:
+
+| Evento | Passos |
+|---|---|
+| todo push e PR | Build & Test (`dotnet test`), imagem Docker com a tag do commit, scan do Trivy (só relatório) |
+| push na `main` | + login no ECR por OIDC, push da imagem e deploy no EKS com rolling update |
+
+O deploy não é escrito no workflow: ele chama o `ci/deploy.sh` deste repositório, que o workflow baixa do GitHub (`ref: main`). O mesmo script serve ao Kind, então o passo de deploy é testado localmente antes de existir a conta da AWS. Ele aplica os manifestos de `k8s/` do serviço trocando a imagem, recria Jobs (o template deles é imutável), espera o rolling update e pula o objeto `Namespace`, que a role do GitHub não pode criar. No primeiro deploy ele cria tudo; nos seguintes, só troca a imagem.
+
+**Configuração no GitHub**, em *Settings → Secrets and variables → Actions → Variables* da organização `fiapgames`. Nenhum segredo da AWS é guardado:
+
+| Variável | Valor |
+|---|---|
+| `AWS_ROLE_ARN` | `DeployRoleArn` do `./infra/aws.sh outputs` |
+| `AWS_REGION` | `us-east-2` |
+| `EKS_CLUSTER` | opcional, padrão `fiapgames` |
+
+**Simulação local**, com o ambiente do `aws-local/up.sh` de pé:
+
+```bash
+ci/simulate-pipeline.sh users-api     # teste, imagem, Trivy, push no registry local, deploy no Kind
+ci/simulate-pipeline.sh catalog-api
+```
+
+Para rodar o próprio arquivo do workflow, como num PR, use o [act](https://github.com/nektos/act) (`winget install nektos.act`) na raiz do repositório do serviço. Ele executa build, testes, imagem e Trivy; o push na `main` não dá para simular, porque o login OIDC na AWS só existe dentro do GitHub:
+
+```bash
+act pull_request -P ubuntu-latest=catthehacker/ubuntu:act-latest
+```
+
+Para validar só a sintaxe dos workflows:
+
+```bash
+docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -no-color   # na raiz do repositório do serviço
+```
 
 ## Deploy no Kubernetes
 
