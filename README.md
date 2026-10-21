@@ -24,6 +24,13 @@ FiapGames.Orchestration/
 ├── docker-compose.yml          sobe tudo localmente, gateway incluído
 ├── .env.example                template das variáveis (o .env real é gitignored)
 ├── kind-config.yaml            publica as portas do gateway no host (não é manifesto k8s)
+├── aws-local/                  ambiente local que espelha a AWS (Fase 4)
+│   ├── up.sh                   Kind + registry + load balancer + OpenSearch + apps
+│   ├── down.sh                 derruba tudo
+│   └── opensearch.yaml         papel do Amazon OpenSearch (não vai para o EKS)
+├── ci/                         passo de deploy da pipeline (Fase 4)
+│   ├── deploy.sh               aplica os manifestos de um serviço com a imagem nova (EKS e Kind)
+│   └── services.sh             lista dos microsserviços, usada pelos scripts
 ├── kong/                       configuração declarativa do gateway
 │   ├── kong.k8s.yml            rotas + políticas (canônico, ambiente Kubernetes)
 │   ├── kong.compose.yml        idem, ambiente docker-compose
@@ -525,6 +532,40 @@ Encerrar tudo:
 ```bash
 docker compose down -v
 ```
+
+## Ambiente local espelhando a AWS (Fase 4)
+
+A Fase 4 roda em produção na AWS (EKS). Para desenvolver e testar sem gastar nada, cada peça gerenciada da AWS tem um substituto local, e os manifestos do Kubernetes são os mesmos nos dois lados:
+
+| Na AWS | Local | Onde |
+|---|---|---|
+| EKS | Kind (`fiapgames`) | `kind-config.yaml` |
+| ECR | registry `localhost:5001`, imagens `fiapgames/<serviço>:<commit>` | `aws-local/up.sh` |
+| Load balancer do `Service type: LoadBalancer` | [cloud-provider-kind](https://github.com/kubernetes-sigs/cloud-provider-kind) | `kong-proxy` em `k8s/kong/02-kong.yaml` |
+| Amazon OpenSearch Service | container `opensearchproject/opensearch:2.19.4` | `aws-local/opensearch.yaml` (Kind) e `docker-compose.yml` |
+| MongoDB e Redis | os mesmos manifestos de `k8s/` | rodam dentro do cluster nos dois ambientes |
+
+```bash
+./aws-local/up.sh                 # sobe tudo: cluster, registry, LB, infra, build+push das 3 APIs, Kong
+SKIP_BUILD=1 ./aws-local/up.sh    # reaplica os manifestos sem rebuildar
+./aws-local/down.sh               # derruba (KEEP_REGISTRY=0 remove também o registry)
+```
+
+O script substitui os passos 1 a 8 do [passo a passo manual](#passo-a-passo-testado-cluster-local-com-kind) abaixo e é idempotente: rodar de novo rebuilda as imagens com a tag do commit de cada repositório e o Kubernetes faz rolling update, que é o mesmo fluxo que a pipeline fará no EKS. No Windows, rode pelo Git Bash. Se a porta 8000 do host já estiver em uso, aponte `KIND_CONFIG` para uma cópia do `kind-config.yaml` com outro `hostPort`.
+
+**O gateway tem dois Services.** O `kong-proxy` (`type: LoadBalancer`, porta 80) é a entrada pública: no EKS ele cria um load balancer da AWS; no Kind, o cloud-provider-kind sobe um Envoy e dá a ele um `EXTERNAL-IP`. O `nodePort: 30000` continua fixo, então `http://localhost:8000` segue funcionando. Admin API, Kong Manager e métricas ficam no Service `kong` (`NodePort`), fora do load balancer, para nunca ficarem expostos na internet.
+
+**O cloud-provider-kind roda no host, não em container.** O script baixa o binário da release (com checksum) para `aws-local/.bin/` e o deixa em segundo plano; o log fica em `aws-local/.bin/cloud-provider-kind.log`. Em container, no Docker Desktop, ele não alcança as portas publicadas do Envoy e o `EXTERNAL-IP` fica `<pending>` para sempre. No Windows e no Mac o IP do LB não é roteável do host, então o Envoy publica a porta 80 numa porta aleatória, que o script mostra no final (`no host: http://localhost:<porta>`).
+
+**OpenSearch.** Sem TLS e sem senha localmente; o domínio na AWS terá os dois, então a URL e as credenciais devem vir de configuração, nunca do código.
+
+| Ambiente | URL |
+|---|---|
+| docker compose (host) | `http://localhost:9200`, Dashboards em `http://localhost:5601` |
+| docker compose (entre containers) | `http://opensearch:9200` |
+| Kind | `http://opensearch.fiapgames.svc.cluster.local:9200` |
+
+Use o cliente `OpenSearch.Client` no .NET: o `Elastic.Clients.Elasticsearch` verifica se o servidor é Elasticsearch e recusa o OpenSearch.
 
 ## Deploy no Kubernetes
 

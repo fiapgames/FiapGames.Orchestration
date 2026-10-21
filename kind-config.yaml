@@ -18,6 +18,12 @@
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: fiapgames
+# Lets containerd read per-registry hosts.toml, which aws-local/up.sh uses to
+# point localhost:5001 (the local stand-in for ECR) at the registry container.
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      config_path = "/etc/containerd/certs.d"
 nodes:
   - role: control-plane
     extraPortMappings:
