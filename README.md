@@ -21,6 +21,8 @@ projeto pos parte 2/
 
 ```
 FiapGames.Orchestration/
+├── .github/workflows/
+│   └── ambiente-aws.yml        botões ligar/desligar e desligamento automático da AWS
 ├── docker-compose.yml          sobe tudo localmente, gateway incluído
 ├── .env.example                template das variáveis (o .env real é gitignored)
 ├── kind-config.yaml            publica as portas do gateway no host (não é manifesto k8s)
@@ -30,7 +32,11 @@ FiapGames.Orchestration/
 │   └── opensearch.yaml         papel do Amazon OpenSearch (não vai para o EKS)
 ├── ci/                         passo de deploy da pipeline (Fase 4)
 │   ├── deploy.sh               aplica os manifestos de um serviço com a imagem nova (EKS e Kind)
+│   ├── idle-check.sh           mede se o ambiente está ocioso (desligamento automático)
 │   └── services.sh             lista dos microsserviços, usada pelos scripts
+├── infra/                      infraestrutura da AWS (Fase 4)
+│   ├── aws.sh                  lint / plan / up / down / idle-check / keep-alive / outputs / destroy
+│   └── cloudformation/         uma stack por template, na ordem do prefixo
 ├── kong/                       configuração declarativa do gateway
 │   ├── kong.k8s.yml            rotas + políticas (canônico, ambiente Kubernetes)
 │   ├── kong.compose.yml        idem, ambiente docker-compose
@@ -566,6 +572,80 @@ O script substitui os passos 1 a 8 do [passo a passo manual](#passo-a-passo-test
 | Kind | `http://opensearch.fiapgames.svc.cluster.local:9200` |
 
 Use o cliente `OpenSearch.Client` no .NET: o `Elastic.Clients.Elasticsearch` verifica se o servidor é Elasticsearch e recusa o OpenSearch.
+
+## Infraestrutura na AWS (CloudFormation)
+
+Toda a infraestrutura da AWS sai de `infra/cloudformation/`, uma stack por template, ligadas por exports (`Fn::ImportValue`). O que roda **dentro** do cluster não é CloudFormation: são os manifestos de `k8s/` e de cada serviço, aplicados com `kubectl`.
+
+As stacks se dividem em dois grupos. As **permanentes** não cobram por hora e sobrevivem ao `down`. As **do ambiente** são o que custa, e ligam e desligam juntas.
+
+| Stack | Template | Grupo | O que cria |
+|---|---|---|---|
+| `fiapgames-base` | `00-base.yaml` | permanente | provedor OIDC do GitHub e a role `fiapgames-github-infra`, que liga e desliga o ambiente. Só o workflow da `main` deste repositório pode usá-la |
+| `fiapgames-ecr` | `02-ecr.yaml` | permanente | `fiapgames/catalog-api`, `fiapgames/users-api`, `fiapgames/payments-api`, com scan no push e expiração após 20 imagens. Permanente para as imagens sobreviverem ao `down` |
+| `fiapgames-budget` | `06-budget.yaml` | permanente | alerta de custo por e-mail (só com `BUDGET_EMAIL`) |
+| `fiapgames-network` | `01-network.yaml` | ambiente | VPC `10.20.0.0/16`, 2 subnets públicas, internet gateway. Sem NAT Gateway, que custaria quase metade do control plane |
+| `fiapgames-eks` | `03-eks.yaml` | ambiente | EKS 1.35 (preso ao suporte padrão), 2× `t3.large`, acesso de admin para a role de infra e para `EKS_ADMIN_ARN` |
+| `fiapgames-opensearch` | `04-opensearch.yaml` | ambiente | OpenSearch 2.19, 1 nó `t3.small.search`, 10 GiB, dentro da VPC, HTTPS só a partir do cluster |
+| `fiapgames-github` | `05-github-actions.yaml` | ambiente | role `fiapgames-github-actions` da pipeline: push no ECR e edição só do namespace `fiapgames` |
+
+```bash
+./infra/aws.sh lint          # cfn-lint, sem AWS (usa Docker se não estiver instalado)
+./infra/aws.sh plan          # valida na AWS e mostra o change set das stacks existentes
+./infra/aws.sh up            # liga: stacks + infra compartilhada + Kong + as 3 APIs (~35 min do zero)
+./infra/aws.sh down          # desliga: apaga as stacks do ambiente
+./infra/aws.sh idle-check    # desliga se ninguém usou o gateway nos últimos IDLE_MINUTES (padrão 60)
+./infra/aws.sh keep-alive    # zera o contador de ociosidade
+./infra/aws.sh outputs       # registry, roles do GitHub, endpoint do OpenSearch
+./infra/aws.sh destroy       # down + apaga também as permanentes
+```
+
+O `up` termina com o **bootstrap** do cluster: aplica `k8s/` (RabbitMQ, bancos, Redis), o Kong e as três APIs com o `ci/deploy.sh`, usando a última imagem de cada uma no ECR. Se o ECR ainda estiver vazio, ele builda a imagem a partir do repositório ao lado. Por isso os repositórios dos serviços precisam estar clonados lado a lado com este.
+
+**Permissões.** O primeiro `up` roda da sua máquina, com um usuário IAM com `AdministratorAccess`, porque é ele que cria a base que o GitHub usa depois. Esse usuário vira admin do cluster (`EKS_ADMIN_ARN`, padrão: o usuário que rodou). Para dar acesso a outro integrante:
+
+```bash
+aws eks create-access-entry --cluster-name fiapgames --principal-arn <arn-do-usuario>
+aws eks associate-access-policy --cluster-name fiapgames --principal-arn <arn-do-usuario>   --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy --access-scope type=cluster
+```
+
+**Custo.** Por volta de US$ 0,36/h com o ambiente ligado (control plane, 2 nós, OpenSearch, load balancer e IPs públicos), uns US$ 8,50/dia. Desligado, as permanentes custam centavos por mês (só o armazenamento das imagens).
+
+### Ligar, desligar e desligamento automático
+
+O workflow `.github/workflows/ambiente-aws.yml` deste repositório tem três botões em *Actions → Ambiente AWS → Run workflow*: **ligar**, **desligar** e **manter-ligado**. A cada 15 minutos ele também verifica o uso e **desliga sozinho quando ninguém usou o gateway por `AUTO_OFF_IDLE_MINUTES`** (padrão 60). Roda nos servidores do GitHub, então funciona com todos os computadores do grupo desligados.
+
+Conta como uso: qualquer requisição pelo Kong, exceto health checks (uma aba esquecida no navegador não segura o ambiente ligado), e qualquer deploy novo no cluster. O estado fica no ConfigMap `auto-off` do namespace `fiapgames` e some junto com o cluster. Se o uso não puder ser medido (Kong fora do ar, bootstrap incompleto), vale a idade do cluster. Uma verificação que encontra uma stack sendo criada ou apagada espera a rodada seguinte. A lógica está em `ci/idle-check.sh` e pode ser testada contra o Kind:
+
+```bash
+KUBE_CONTEXT=kind-fiapgames ci/idle-check.sh check 60   # sai com 10 se está ocioso
+```
+
+**Configuração no GitHub** (*Settings → Secrets and variables → Actions* deste repositório):
+
+| Nome | Tipo | Valor |
+|---|---|---|
+| `AWS_INFRA_ROLE_ARN` | variável | `InfraRoleArn` do `./infra/aws.sh outputs`. Sem ela o workflow não faz nada |
+| `AWS_REGION` | variável | `us-east-2` |
+| `EKS_ADMIN_ARN` | variável | ARN do seu usuário IAM, para manter seu acesso ao cluster quando o GitHub religar |
+| `AUTO_OFF_IDLE_MINUTES` | variável | opcional, padrão `60` |
+| `BUDGET_EMAIL` | variável | opcional, e-mail do alerta de custo |
+| `NOTIFICATIONS_FUNCTION_KEY` | secret | chave da Azure Function de notificações |
+
+Dois cuidados do GitHub: agendamentos só rodam a partir da `main`, e ele pausa workflows agendados de repositório público depois de 60 dias sem nenhum commit. O alerta de orçamento por e-mail continua como última proteção.
+
+**Para o CI/CD.** O `outputs` mostra `DeployRoleArn` (vai em `AWS_ROLE_ARN`, ver [Pipeline de CI/CD](#pipeline-de-cicd-github-actions)) e `RegistryUri`. Só workflows rodando na `main` dos repositórios da organização `fiapgames` conseguem assumir essa role, o que garante que a `main` é o que está em produção.
+
+**Para a busca.** O `DomainEndpoint` vira `https://<endpoint>` na configuração do Catalog. O domínio só aceita conexões vindas do cluster, sem usuário nem senha, e não é acessível pela internet. Para abrir no seu navegador, crie um túnel temporário:
+
+```bash
+kubectl run os-tunnel -n fiapgames --image=alpine/socat:1.8.0.3 -- \
+  tcp-listen:9200,fork,reuseaddr openssl-connect:<endpoint>:443,verify=0
+kubectl port-forward -n fiapgames pod/os-tunnel 9200:9200   # http://localhost:9200/_dashboards
+kubectl delete pod os-tunnel -n fiapgames
+```
+
+**Load balancer do Kong.** O `Service` `kong-proxy` (`type: LoadBalancer`) faz o EKS criar um load balancer na AWS sozinho, sem Helm nem controller extra. O `down` apaga esse Service antes das stacks, porque o load balancer não pertence a nenhuma delas e travaria a remoção da VPC.
 
 ## Deploy no Kubernetes
 

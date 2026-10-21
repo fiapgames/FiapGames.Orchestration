@@ -1,0 +1,94 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: FiapGames - Amazon OpenSearch Service domain for the Catalog search.
+
+# Lives inside the VPC and only accepts HTTPS from the EKS cluster security
+# group, so the pods need no credentials and the domain is never on the internet.
+# Requires the AWSServiceRoleForAmazonOpenSearchService service-linked role
+# (infra/aws.sh creates it before deploying).
+
+Parameters:
+  NetworkStackName:
+    Type: String
+    Default: fiapgames-network
+  EksStackName:
+    Type: String
+    Default: fiapgames-eks
+  DomainName:
+    Type: String
+    Default: fiapgames-search
+  EngineVersion:
+    Type: String
+    Default: OpenSearch_2.19
+    Description: Same major/minor as the local container (aws-local/opensearch.yaml).
+  InstanceType:
+    Type: String
+    Default: t3.small.search
+  VolumeSizeGiB:
+    Type: Number
+    Default: 10
+
+Resources:
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: OpenSearch - HTTPS from the EKS cluster only
+      VpcId: !ImportValue
+        Fn::Sub: ${NetworkStackName}-VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !ImportValue
+            Fn::Sub: ${EksStackName}-ClusterSecurityGroupId
+      Tags:
+        - Key: Name
+          Value: !Sub ${DomainName}-sg
+
+  Domain:
+    Type: AWS::OpenSearchService::Domain
+    Properties:
+      DomainName: !Ref DomainName
+      EngineVersion: !Ref EngineVersion
+      # Single node, no standby, no zone awareness: the cheapest shape that
+      # still counts as a managed instance.
+      ClusterConfig:
+        InstanceType: !Ref InstanceType
+        InstanceCount: 1
+        ZoneAwarenessEnabled: false
+        MultiAZWithStandbyEnabled: false
+        DedicatedMasterEnabled: false
+      EBSOptions:
+        EBSEnabled: true
+        VolumeType: gp2
+        VolumeSize: !Ref VolumeSizeGiB
+      VPCOptions:
+        SubnetIds:
+          - !ImportValue
+            Fn::Sub: ${NetworkStackName}-PublicSubnetA
+        SecurityGroupIds:
+          - !Ref SecurityGroup
+      EncryptionAtRestOptions:
+        Enabled: true
+      NodeToNodeEncryptionOptions:
+        Enabled: true
+      DomainEndpointOptions:
+        EnforceHTTPS: true
+        TLSSecurityPolicy: Policy-Min-TLS-1-2-2019-07
+      # Open policy is safe only because the security group above is the gate.
+      AccessPolicies:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: "*"
+            Action: es:ESHttp*
+            Resource: !Sub arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${DomainName}/*
+
+Outputs:
+  DomainEndpoint:
+    Description: Use as https://<endpoint> in the Catalog configuration.
+    Value: !GetAtt Domain.DomainEndpoint
+    Export:
+      Name: !Sub ${AWS::StackName}-DomainEndpoint
+  DomainArn:
+    Value: !GetAtt Domain.Arn
