@@ -38,8 +38,9 @@ env:
 
 jobs:
   ambiente:
-    # Sem a base na AWS ainda, não há o que ligar nem desligar.
-    if: vars.AWS_INFRA_ROLE_ARN != ''
+    # Sem a base na AWS ainda, não há o que ligar nem desligar. Só um ARN de
+    # verdade libera o job: vazio ou valor provisório não dispara falha a cada 15 min.
+    if: startsWith(vars.AWS_INFRA_ROLE_ARN, 'arn:aws:iam::')
     runs-on: ubuntu-latest
     timeout-minutes: 100
     steps:
