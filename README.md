@@ -22,7 +22,7 @@ projeto pos parte 2/
 ```
 FiapGames.Orchestration/
 ├── .github/workflows/
-│   └── ambiente-aws.yml        botões ligar/desligar e desligamento automático da AWS
+│   └── deploy-prod.yml         botões ligar/desligar e desligamento automático da AWS
 ├── docker-compose.yml          sobe tudo localmente, gateway incluído
 ├── .env.example                template das variáveis (o .env real é gitignored)
 ├── kind-config.yaml            publica as portas do gateway no host (não é manifesto k8s)
@@ -642,7 +642,7 @@ aws eks associate-access-policy --cluster-name fiapgames --principal-arn <arn-do
 
 ### Ligar, desligar e desligamento automático
 
-O workflow `.github/workflows/ambiente-aws.yml` deste repositório tem três botões em *Actions → Ambiente AWS → Run workflow*: **ligar**, **desligar** e **manter-ligado**. A cada 15 minutos ele também verifica o uso e **desliga sozinho quando ninguém usou o gateway por `AUTO_OFF_IDLE_MINUTES`** (padrão 60). Roda nos servidores do GitHub, então funciona com todos os computadores do grupo desligados.
+O workflow `.github/workflows/deploy-prod.yml` deste repositório tem três botões em *Actions → deploy-prod → Run workflow*: **ligar**, **desligar** e **manter-ligado**. A cada 15 minutos ele também verifica o uso e **desliga sozinho quando ninguém usou o gateway por `AUTO_OFF_IDLE_MINUTES`** (padrão 60). Roda nos servidores do GitHub, então funciona com todos os computadores do grupo desligados.
 
 Conta como uso: qualquer requisição pelo Kong, exceto health checks (uma aba esquecida no navegador não segura o ambiente ligado), e qualquer deploy novo no cluster. O estado fica no ConfigMap `auto-off` do namespace `fiapgames` e some junto com o cluster. Se o uso não puder ser medido (Kong fora do ar, bootstrap incompleto), vale a idade do cluster. Uma verificação que encontra uma stack sendo criada ou apagada espera a rodada seguinte. A lógica está em `ci/idle-check.sh` e pode ser testada contra o Kind:
 
