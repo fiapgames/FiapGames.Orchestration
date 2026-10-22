@@ -47,24 +47,31 @@ spec:
                 echo "waiting for konga..."
                 sleep 2
               done
-        # Credenciais de dev fixas — mesma convenção já usada no resto do
-        # projeto (RabbitMQ/Postgres/SQL Server). É o login da própria Konga,
-        # sem relação nenhuma com o JWT do gateway.
+        # Login da própria Konga, sem relação nenhuma com o JWT do gateway.
         - name: register-admin
           image: busybox:1.36
+          env:
+            - name: KONGA_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: infra-credentials
+                  key: konga-admin-password
           command:
             - sh
             - -c
             - |
               wget -q -O /dev/null --header 'Content-Type: application/json' \
-                --post-data '{"username":"admin","email":"admin@fiapgames.local","password":"FiapGames@Admin123","password_confirmation":"FiapGames@Admin123"}' \
+                --post-data "{\"username\":\"admin\",\"email\":\"admin@fiapgames.local\",\"password\":\"$KONGA_ADMIN_PASSWORD\",\"password_confirmation\":\"$KONGA_ADMIN_PASSWORD\"}" \
                 http://konga.fiapgames.svc.cluster.local:1337/register || true
       containers:
         - name: connect
           image: postgres:11.16
           env:
             - name: PGPASSWORD
-              value: "kong"
+              valueFrom:
+                secretKeyRef:
+                  name: infra-credentials
+                  key: kong-db-password
           command:
             - sh
             - -c

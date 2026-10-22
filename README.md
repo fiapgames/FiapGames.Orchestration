@@ -33,6 +33,7 @@ FiapGames.Orchestration/
 ├── ci/                         passo de deploy da pipeline (Fase 4)
 │   ├── deploy.sh               aplica os manifestos de um serviço com a imagem nova (EKS e Kind)
 │   ├── idle-check.sh           mede se o ambiente está ocioso (desligamento automático)
+│   ├── secrets.sh              cria os Secrets do Kubernetes a partir do .env ou dos GitHub Secrets
 │   ├── services.sh             lista dos microsserviços, usada pelos scripts
 │   └── simulate-pipeline.sh    roda os passos do workflow localmente, contra o Kind
 ├── infra/                      infraestrutura da AWS (Fase 4)
@@ -194,7 +195,7 @@ A versão **11.16 é fixada de propósito e não deve ser atualizada**: o Konga 
 - **Kong Manager** (`http://localhost:8002`) — GUI **oficial**, embutida na própria imagem `kong:3.4+`, sem container nem banco extra. Mantida pela Kong.
 - **Konga** (`http://localhost:1337`) — GUI da comunidade. **Login e Connection são automáticos** (serviços `konga-register`/`konga-connect` no compose, Job `konga-connect` no k8s — ver abaixo). Entre com:
   - **usuário:** `admin`
-  - **senha:** `FiapGames@Admin123`
+  - **senha:** `KONGA_ADMIN_PASSWORD` do `.env` (compose e Kind) ou do Secret `infra-credentials` (EKS)
 
 > O Konga está **arquivado** upstream e seu suporte oficial vai até o Kong 2.x — a imagem `pantsel/konga:latest` é de **maio de 2020**. Está aqui porque a aula pede. Se alguma tela quebrar com o Kong 3.x, há dois caminhos: trocar a tag para `pantsel/konga:next` (build da branch de desenvolvimento, um pouco mais nova) ou simplesmente usar o Kong Manager, que cobre a mesma função e é mantido.
 
@@ -202,7 +203,7 @@ A versão **11.16 é fixada de propósito e não deve ser atualizada**: o Konga 
 
 Nada disso está documentado no projeto Konga (arquivado), foi descoberto testando ao vivo:
 
-1. **`POST /register` cria o admin.** É idempotente na prática, mas com uma pegadinha: Konga permite **um único admin no sistema inteiro** — a checagem é `count(admin=true) > 0`, não "esse username já existe". Então, se você (humano) já registrou um admin pela tela com outro usuário, a tentativa automática com `admin`/`FiapGames@Admin123` é rejeitada, e as credenciais que valem são as que você criou manualmente.
+1. **`POST /register` cria o admin.** É idempotente na prática, mas com uma pegadinha: Konga permite **um único admin no sistema inteiro** — a checagem é `count(admin=true) > 0`, não "esse username já existe". Então, se você (humano) já registrou um admin pela tela com outro usuário, a tentativa automática com o usuário `admin` é rejeitada, e as credenciais que valem são as que você criou manualmente.
 2. **A Connection não tem endpoint HTTP simples de criação** — vive só na tabela `konga_kong_nodes` do banco da própria Konga, inserida via SQL direto pelo Job/serviço.
 3. **O ponto mais sutil:** qual connection está "ativa" para um usuário **não** é o campo `konga_kong_nodes.active` (isso só marca qual nó aparece destacado na lista) — é o campo `konga_users.node` (FK para `konga_kong_nodes.id`), que o frontend lê da **resposta do login** e guarda no `localStorage` do navegador. Sem esse campo setado, o menu **API GATEWAY** (Services/Routes/Consumers/Plugins) fica escondido mesmo com uma Connection já existindo no banco — e quem já estava logado só vê a mudança depois de deslogar e logar de novo (o valor é lido uma vez, no login, não em tempo real).
 
@@ -407,10 +408,11 @@ O Notifications não aparece na tabela porque é serverless — não há contain
 
 ## Executando localmente
 
-Antes de subir, crie um arquivo `.env` neste diretório com a chave da Azure Function de notificações:
+Antes de subir, gere o `.env` com as senhas (aleatórias, nunca versionadas) e acrescente a chave da Azure Function de notificações:
 
 ```bash
-echo 'NOTIFICATIONS_FUNCTION_KEY=<chave da function>' > .env
+ci/secrets.sh dotenv .env
+echo 'NOTIFICATIONS_FUNCTION_KEY=<chave da function>' >> .env
 ```
 
 A chave sai de:
@@ -433,11 +435,11 @@ Endpoints úteis — todos pelo gateway (`:8080`/`:8081`/`:8083` estão comentad
 - Payments: `http://localhost:8000/payments/health`
 - Users: `http://localhost:8000/api/users` (cadastro), `/api/users/login`
 
-- RabbitMQ management: `http://localhost:15672` (usuário `fiapgames-admin`, senha `FiapGames@Admin123`)
+- RabbitMQ management: `http://localhost:15672` (usuário `fiapgames-admin`, senha `RABBITMQ_PASSWORD` do `.env`)
 - Kong Manager (GUI oficial, sem login): `http://localhost:8002`
-- Konga (GUI da comunidade): `http://localhost:1337` — **login já vem criado sozinho**, usuário `admin`, senha `FiapGames@Admin123` (ver [Duas UIs de administração](#duas-uis-de-administração))
+- Konga (GUI da comunidade): `http://localhost:1337` — **login já vem criado sozinho**, usuário `admin`, senha `KONGA_ADMIN_PASSWORD` do `.env` (ver [Duas UIs de administração](#duas-uis-de-administração))
 - Notifications (Azure): `https://fiap-games-notification-hdaza0g6fudjc3ak.westus3-01.azurewebsites.net/api/health`
-- MongoDB: `localhost:27017` (usuário `fiapgames-admin`, senha `FiapGames@Admin123`) — `docker compose exec mongodb mongosh -u fiapgames-admin -p 'FiapGames@Admin123'`
+- MongoDB: `localhost:27017` (usuário `fiapgames-admin`, senha `MONGO_PASSWORD` do `.env`) — `docker compose exec mongodb sh -c 'mongosh -u fiapgames-admin -p "$MONGO_INITDB_ROOT_PASSWORD"'`
 - Redis: `localhost:6380` (porta do container é 6379; remapeada porque a 6379 costuma já estar em uso por outro projeto na máquina) — `docker compose exec redis redis-cli`
 
 **As APIs não publicam porta no host.** As portas 8080–8083 estão comentadas no `docker-compose.yml` de propósito, para que o gateway seja de fato a única entrada — igual ao que já acontecia no Kubernetes. Para debug direto (por exemplo abrir o `/swagger` do Catalog), descomente o bloco `ports:` do serviço em questão e rode `docker compose up -d <serviço>`.
@@ -574,6 +576,32 @@ O script substitui os passos 1 a 8 do [passo a passo manual](#passo-a-passo-test
 
 Use o cliente `OpenSearch.Client` no .NET: o `Elastic.Clients.Elasticsearch` verifica se o servidor é Elasticsearch e recusa o OpenSearch.
 
+## Segredos
+
+Nenhuma senha, connection string ou chave fica no código, nos YAMLs ou nos `appsettings.json` (item 5 da Fase 4). Os manifestos só referenciam Secrets do Kubernetes, e quem cria esses Secrets é o `ci/secrets.sh`, a partir de variáveis de ambiente:
+
+| Ambiente | De onde vêm os valores |
+|---|---|
+| docker compose | `.env` deste diretório (não versionado). `ci/secrets.sh dotenv .env` preenche o que faltar com valores aleatórios |
+| Kind (`aws-local/up.sh`) | o mesmo `.env`, completado na primeira execução |
+| EKS (`infra/aws.sh up` ou o botão *ligar*) | GitHub Secrets do repositório (`NOTIFICATIONS_FUNCTION_KEY`, `NEW_RELIC_LICENSE_KEY`, `KONGA_ADMIN_PASSWORD`). As senhas internas (bancos, RabbitMQ, JWT) são geradas a cada *ligar* e existem só dentro do cluster |
+
+Se o Secret já existe no cluster, os valores dele são mantidos: rodar o bootstrap de novo não troca a senha de um banco que já foi inicializado com a anterior.
+
+| Secret | Quem usa |
+|---|---|
+| `infra-credentials` | RabbitMQ, Postgres, SQL Server, MongoDB, banco do Kong, Konga e a chave do JWT que o bootstrap do Kong põe no lugar de `<JWT_SECRET_KEY>` em `kong/kong.k8s.yml` |
+| `catalog-api-secrets`, `user-api-secret`, `payments-api-secrets` | as três APIs, via `envFrom`. Os repositórios dos serviços não trazem mais esses manifestos |
+| `newrelic` | agentes APM e plugins do Kong, só quando `NEW_RELIC_LICENSE_KEY` existe |
+
+Para ler uma senha no cluster (por exemplo, o login da Konga):
+
+```bash
+kubectl get secret infra-credentials -n fiapgames -o go-template='{{index .data "konga-admin-password" | base64decode}}'
+```
+
+Rodando uma API fora de container (`dotnet run`), passe a connection string por variável de ambiente ou `dotnet user-secrets`, nos mesmos nomes do compose (`ConnectionStrings__SqlServer`, `Jwt__SecretKey`...).
+
 ## Infraestrutura na AWS (CloudFormation)
 
 Toda a infraestrutura da AWS sai de `infra/cloudformation/`, uma stack por template, ligadas por exports (`Fn::ImportValue`). O que roda **dentro** do cluster não é CloudFormation: são os manifestos de `k8s/` e de cada serviço, aplicados com `kubectl`.
@@ -632,6 +660,8 @@ KUBE_CONTEXT=kind-fiapgames ci/idle-check.sh check 60   # sai com 10 se está oc
 | `AUTO_OFF_IDLE_MINUTES` | variável | opcional, padrão `60` |
 | `BUDGET_EMAIL` | variável | opcional, e-mail do alerta de custo |
 | `NOTIFICATIONS_FUNCTION_KEY` | secret | chave da Azure Function de notificações |
+| `NEW_RELIC_LICENSE_KEY` | secret | opcional, liga a observabilidade |
+| `KONGA_ADMIN_PASSWORD` | secret | opcional, senha de login da Konga; sem ele é gerada |
 
 Dois cuidados do GitHub: agendamentos só rodam a partir da `main`, e ele pausa workflows agendados de repositório público depois de 60 dias sem nenhum commit. O alerta de orçamento por e-mail continua como última proteção.
 
@@ -692,7 +722,7 @@ docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -no-color   # n
 
 > **Status atual: Catalog, Payments e Users foram testados no cluster Kind; o Notifications não é mais implantado lá** — virou Azure Functions serverless, fora do cluster. O `Fiap.Games.Users` originalmente trazia sua própria pasta `k8s/` isolada (namespace `games-fiap`, RabbitMQ e SQL Server próprios) — foi reconciliada para usar o namespace e a infraestrutura compartilhados (`fiapgames`), do mesmo jeito que os outros dois. Os manifestos de infra e RabbitMQ próprios do Users foram removidos (`00-namespace.yaml`, `rabbitmq.yaml`, `sqlserver.yaml`, `kustomization.yaml`); um novo `sqlserver-users.yaml` (SQL Server dedicado do Users, já que cada serviço tem seu próprio banco) foi adicionado aqui, em `k8s/`.
 
-Cada microsserviço mantém seus próprios manifestos (`Deployment`, `ConfigMap`/`Secret`, e no caso do Catalog e do Users também `Service`) em `k8s/` no respectivo repositório. Esses manifestos assumem que a infraestrutura compartilhada (RabbitMQ, Postgres, SQL Server) já existe no cluster com hostnames fixos:
+Cada microsserviço mantém seus próprios manifestos (`Deployment`, `ConfigMap`, e no caso do Catalog e do Users também `Service`) em `k8s/` no respectivo repositório. Esses manifestos assumem que a infraestrutura compartilhada (RabbitMQ, Postgres, SQL Server) já existe no cluster com hostnames fixos:
 
 - `rabbitmq.fiapgames.svc.cluster.local` (Payments, Catalog, Users)
 - `postgres.fiapgames.svc.cluster.local` (Payments — base `fiapgames-payments`)
@@ -784,7 +814,7 @@ Pronto — o gateway está em `http://localhost:8000` e é por ali que tudo deve
 |---|---|
 | `http://localhost:8000` | **proxy** — a API inteira (`/api/users`, `/games`, `/orders`, `/orders/{id}/history`, `/library`, `/health`) |
 | `http://localhost:8002` | Kong Manager (GUI oficial, sem login) |
-| `http://localhost:1337` | Konga (GUI da comunidade) — **login já vem criado sozinho**: usuário `admin`, senha `FiapGames@Admin123` |
+| `http://localhost:1337` | Konga (GUI da comunidade) — **login já vem criado sozinho**: usuário `admin`, senha `KONGA_ADMIN_PASSWORD` do `.env` |
 | `http://localhost:8001` | Admin API do Kong |
 | `http://localhost:8100/metrics` | métricas Prometheus |
 

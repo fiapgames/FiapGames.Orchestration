@@ -33,7 +33,7 @@ services:
     container_name: fiapgames-rabbitmq
     environment:
       RABBITMQ_DEFAULT_USER: fiapgames-admin
-      RABBITMQ_DEFAULT_PASS: FiapGames@Admin123
+      RABBITMQ_DEFAULT_PASS: "${RABBITMQ_PASSWORD:?rode ci/secrets.sh dotenv .env}"
     ports:
       - "5672:5672"
       - "15672:15672"
@@ -50,7 +50,7 @@ services:
     container_name: fiapgames-catalog-sqlserver
     environment:
       ACCEPT_EULA: "Y"
-      MSSQL_SA_PASSWORD: "FiapGames@Admin123"
+      MSSQL_SA_PASSWORD: "${SQLSERVER_CATALOG_PASSWORD:?rode ci/secrets.sh dotenv .env}"
     ports:
       - "1433:1433"
     healthcheck:
@@ -66,7 +66,7 @@ services:
     container_name: fiapgames-payments-postgres
     environment:
       POSTGRES_USER: fiapgames-admin
-      POSTGRES_PASSWORD: FiapGames@Admin123
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?rode ci/secrets.sh dotenv .env}"
       POSTGRES_DB: fiapgames-payments
     ports:
       - "5432:5432"
@@ -83,7 +83,7 @@ services:
     container_name: fiapgames-users-sqlserver
     environment:
       ACCEPT_EULA: "Y"
-      MSSQL_SA_PASSWORD: "RootPassword123!"
+      MSSQL_SA_PASSWORD: "${SQLSERVER_USERS_PASSWORD:?rode ci/secrets.sh dotenv .env}"
     ports:
       - "1434:1433"
     healthcheck:
@@ -101,7 +101,7 @@ services:
     container_name: fiapgames-catalog-mongo
     environment:
       MONGO_INITDB_ROOT_USERNAME: fiapgames-admin
-      MONGO_INITDB_ROOT_PASSWORD: FiapGames@Admin123
+      MONGO_INITDB_ROOT_PASSWORD: "${MONGO_PASSWORD:?rode ci/secrets.sh dotenv .env}"
     ports:
       - "27017:27017"
     healthcheck:
@@ -198,13 +198,13 @@ services:
     environment:
       <<: *newrelic-agent
       NEW_RELIC_APP_NAME: fiapgames-catalog-api
-      ConnectionStrings__SqlServer: "Server=sqlserver-catalog,1433;Database=fiapgames-catalog;User Id=sa;Password=FiapGames@Admin123;TrustServerCertificate=True"
+      ConnectionStrings__SqlServer: "Server=sqlserver-catalog,1433;Database=fiapgames-catalog;User Id=sa;Password=${SQLSERVER_CATALOG_PASSWORD};TrustServerCertificate=True"
       RabbitMq__Host: rabbitmq
       RabbitMq__VirtualHost: "/"
       RabbitMq__UserName: fiapgames-admin
-      RabbitMq__Password: FiapGames@Admin123
-      Jwt__SecretKey: "dev-only-change-this-secret-key-32-bytes-minimum"
-      ConnectionStrings__Mongo: "mongodb://fiapgames-admin:FiapGames%40Admin123@mongodb:27017"
+      RabbitMq__Password: "${RABBITMQ_PASSWORD}"
+      Jwt__SecretKey: "${JWT_SECRET_KEY}"
+      ConnectionStrings__Mongo: "mongodb://fiapgames-admin:${MONGO_PASSWORD}@mongodb:27017"
       Redis__Connection: "redis:6379"
 
   payments-api:
@@ -224,11 +224,11 @@ services:
     environment:
       <<: *newrelic-agent
       NEW_RELIC_APP_NAME: fiapgames-payments-api
-      ConnectionStrings__Postgres: "Host=postgres-payments;Port=5432;Database=fiapgames-payments;Username=fiapgames-admin;Password=FiapGames@Admin123"
+      ConnectionStrings__Postgres: "Host=postgres-payments;Port=5432;Database=fiapgames-payments;Username=fiapgames-admin;Password=${POSTGRES_PASSWORD}"
       RabbitMq__Host: rabbitmq
       RabbitMq__VirtualHost: "/"
       RabbitMq__UserName: fiapgames-admin
-      RabbitMq__Password: FiapGames@Admin123
+      RabbitMq__Password: "${RABBITMQ_PASSWORD}"
       Notifications__BaseUrl: "https://fiap-games-notification-hdaza0g6fudjc3ak.westus3-01.azurewebsites.net"
       Notifications__FunctionKey: "${NOTIFICATIONS_FUNCTION_KEY}"
 
@@ -254,13 +254,13 @@ services:
     environment:
       <<: *newrelic-agent
       NEW_RELIC_APP_NAME: fiapgames-users-api
-      ConnectionStrings__SqlServer: "Server=sqlserver-users,1433;Database=UserGamesFiap;User Id=sa;Password=RootPassword123!;TrustServerCertificate=True;Encrypt=False"
+      ConnectionStrings__SqlServer: "Server=sqlserver-users,1433;Database=UserGamesFiap;User Id=sa;Password=${SQLSERVER_USERS_PASSWORD};TrustServerCertificate=True;Encrypt=False"
       RabbitMq__HostName: rabbitmq
       RabbitMq__Port: "5672"
       RabbitMq__VirtualHost: "/"
       RabbitMq__UserName: fiapgames-admin
-      RabbitMq__Password: FiapGames@Admin123
-      Jwt__SecretKey: "dev-only-change-this-secret-key-32-bytes-minimum"
+      RabbitMq__Password: "${RABBITMQ_PASSWORD}"
+      Jwt__SecretKey: "${JWT_SECRET_KEY}"
       Database__MigrateOnStartup: "true"
       Notifications__BaseUrl: "https://fiap-games-notification-hdaza0g6fudjc3ak.westus3-01.azurewebsites.net"
       Notifications__FunctionKey: "${NOTIFICATIONS_FUNCTION_KEY}"
@@ -283,7 +283,7 @@ services:
     container_name: fiapgames-kong-postgres
     environment:
       POSTGRES_USER: kong
-      POSTGRES_PASSWORD: kong
+      POSTGRES_PASSWORD: "${KONG_DB_PASSWORD:?rode ci/secrets.sh dotenv .env}"
       POSTGRES_DB: kong
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U kong"]
@@ -311,7 +311,9 @@ services:
       KONG_PG_PORT: "5432"
       KONG_PG_DATABASE: kong
       KONG_PG_USER: kong
-      KONG_PG_PASSWORD: kong
+      KONG_PG_PASSWORD: "${KONG_DB_PASSWORD}"
+      # Mesma chave que o UsersAPI usa para assinar; o sed abaixo a coloca no lugar de <JWT_SECRET_KEY>.
+      JWT_SECRET_KEY: "${JWT_SECRET_KEY:?rode ci/secrets.sh dotenv .env}"
       # Usada só pelo `sed` abaixo, para substituir o placeholder <NEW_RELIC_LICENSE_KEY>
       # dentro do container. kong/kong.compose.yml (o arquivo no disco/git) nunca é
       # reescrito — a chave real não fica versionada.
@@ -341,7 +343,8 @@ services:
       - /bin/sh
       - -c
       - >-
-        sed "s|<NEW_RELIC_LICENSE_KEY>|$${NEW_RELIC_LICENSE_KEY:-license-key-not-configured}|g"
+        sed -e "s|<NEW_RELIC_LICENSE_KEY>|$${NEW_RELIC_LICENSE_KEY:-license-key-not-configured}|g"
+        -e "s|<JWT_SECRET_KEY>|$${JWT_SECRET_KEY}|g"
         /kong/kong.yml.template > /tmp/kong.yml &&
         kong migrations bootstrap &&
         kong config db_import /tmp/kong.yml
@@ -364,7 +367,7 @@ services:
       KONG_PG_PORT: "5432"
       KONG_PG_DATABASE: kong
       KONG_PG_USER: kong
-      KONG_PG_PASSWORD: kong
+      KONG_PG_PASSWORD: "${KONG_DB_PASSWORD}"
       KONG_PROXY_LISTEN: 0.0.0.0:8000
       KONG_ADMIN_LISTEN: 0.0.0.0:8001
       KONG_ADMIN_GUI_LISTEN: 0.0.0.0:8002
@@ -397,7 +400,7 @@ services:
     depends_on:
       postgres-kong:
         condition: service_healthy
-    command: ["-c", "prepare", "-a", "postgres", "-u", "postgresql://kong:kong@postgres-kong:5432/konga"]
+    command: ["-c", "prepare", "-a", "postgres", "-u", "postgresql://kong:${KONG_DB_PASSWORD}@postgres-kong:5432/konga"]
     restart: on-failure
 
   # Konga está ARQUIVADO upstream e seu suporte oficial vai até Kong 2.x. Está aqui
@@ -419,10 +422,10 @@ services:
       DB_PORT: "5432"
       DB_DATABASE: konga
       DB_USER: kong
-      DB_PASSWORD: kong
+      DB_PASSWORD: "${KONG_DB_PASSWORD}"
       NODE_ENV: production
       # Assina as sessões do próprio Konga (login dele, não o JWT do gateway).
-      TOKEN_SECRET: konga
+      TOKEN_SECRET: "${KONGA_TOKEN_SECRET:?rode ci/secrets.sh dotenv .env}"
 
   # Registra o admin da Konga (credenciais fixas de dev) e cria automaticamente
   # a Connection apontando para o Kong local — sem isso, seria preciso abrir
@@ -457,7 +460,7 @@ services:
           sleep 2
         done
         wget -q -O /dev/null --header 'Content-Type: application/json' \
-          --post-data '{"username":"admin","email":"admin@fiapgames.local","password":"FiapGames@Admin123","password_confirmation":"FiapGames@Admin123"}' \
+          --post-data '{"username":"admin","email":"admin@fiapgames.local","password":"${KONGA_ADMIN_PASSWORD:?rode ci/secrets.sh dotenv .env}","password_confirmation":"${KONGA_ADMIN_PASSWORD}"}' \
           http://konga:1337/register || true
     restart: on-failure
 
@@ -468,7 +471,7 @@ services:
       konga-register:
         condition: service_completed_successfully
     environment:
-      PGPASSWORD: kong
+      PGPASSWORD: "${KONG_DB_PASSWORD}"
     entrypoint:
       - sh
       - -c

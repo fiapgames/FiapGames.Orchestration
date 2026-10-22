@@ -5,10 +5,8 @@
 # order, and both consumers of this ConfigMap must find it already present. This is
 # the same ordering gotcha the README documents for mailhog.yaml vs namespace.yaml.
 #
-# The password sits in a ConfigMap rather than a Secret to match what this repo
-# already does for infrastructure — rabbitmq.yaml, postgres.yaml, sqlserver.yaml and
-# postgres-kong.yaml all carry their credentials as plain `env:` values. It is a
-# throwaway local credential for a kind cluster, not a real one.
+# KONG_PG_PASSWORD is not here: each consumer reads it from the infra-credentials
+# Secret, which ci/secrets.sh creates outside the repository.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -22,4 +20,3 @@ data:
   KONG_PG_PORT: "5432"
   KONG_PG_DATABASE: "kong"
   KONG_PG_USER: "kong"
-  KONG_PG_PASSWORD: "kong"

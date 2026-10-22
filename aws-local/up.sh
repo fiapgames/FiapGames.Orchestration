@@ -92,8 +92,16 @@ if ! { [ -f "$CPK_PID" ] && kill -0 "$(cat "$CPK_PID")" 2>/dev/null; }; then
   echo $! > "$CPK_PID"
 fi
 
-step "Infraestrutura compartilhada + OpenSearch"
+step "Secrets (senhas do .env, geradas na primeira vez)"
 kubectl apply -f k8s/namespace.yaml
+ci/secrets.sh dotenv .env
+set -a
+# shellcheck disable=SC1090,SC1091
+. <(tr -d '\r' < .env)
+set +a
+KUBE_CONTEXT="kind-${CLUSTER}" ci/secrets.sh apply
+
+step "Infraestrutura compartilhada + OpenSearch"
 kubectl apply -f k8s/
 kubectl apply -f aws-local/opensearch.yaml
 
@@ -124,16 +132,6 @@ for entry in "${SERVICES[@]}"; do
   KUBE_CONTEXT="kind-${CLUSTER}" ci/deploy.sh "$WORKSPACE/$repo/k8s" "$placeholder" "$image"
 done
 
-# A chave da Azure Function nunca é versionada: vem do .env, se existir.
-FUNCTION_KEY="$(grep -s '^NOTIFICATIONS_FUNCTION_KEY=' .env | cut -d= -f2- || true)"
-if [ -n "$FUNCTION_KEY" ]; then
-  for secret in payments-api-secrets user-api-secret; do
-    kubectl patch secret "$secret" -n "$NAMESPACE" --type merge \
-      -p "{\"stringData\":{\"Notifications__FunctionKey\":\"${FUNCTION_KEY}\"}}" >/dev/null
-  done
-  kubectl rollout restart deployment/payments-api deployment/user-api -n "$NAMESPACE" >/dev/null
-fi
-
 step "API Gateway (Kong + Konga)"
 kubectl create secret generic kong-declarative-config -n "$NAMESPACE" \
   --from-file=kong.yml.template=kong/kong.k8s.yml --dry-run=client -o yaml | kubectl apply -f -
@@ -161,4 +159,5 @@ Pronto.
   Load balancer kong-proxy:  EXTERNAL-IP ${LB:-pendente}${LB_HOST_PORT:+, no host: http://localhost:${LB_HOST_PORT}}
   Registry (ECR local):      http://${REGISTRY}/v2/_catalog
   OpenSearch:                kubectl port-forward -n ${NAMESPACE} svc/opensearch 9200:9200
+  Konga:                     http://localhost:1337, usuário admin, senha KONGA_ADMIN_PASSWORD do .env
 EOF

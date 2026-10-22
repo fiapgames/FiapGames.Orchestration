@@ -29,7 +29,11 @@ env:
   IDLE_MINUTES: ${{ vars.AUTO_OFF_IDLE_MINUTES || '60' }}
   EKS_ADMIN_ARN: ${{ vars.EKS_ADMIN_ARN }}
   BUDGET_EMAIL: ${{ vars.BUDGET_EMAIL }}
+  # Chaves externas e o login da Konga vêm dos Secrets do repositório; as senhas
+  # internas (bancos, RabbitMQ, JWT) o ci/secrets.sh gera a cada "ligar".
   NOTIFICATIONS_FUNCTION_KEY: ${{ secrets.NOTIFICATIONS_FUNCTION_KEY }}
+  NEW_RELIC_LICENSE_KEY: ${{ secrets.NEW_RELIC_LICENSE_KEY }}
+  KONGA_ADMIN_PASSWORD: ${{ secrets.KONGA_ADMIN_PASSWORD }}
   ACAO: ${{ github.event_name == 'schedule' && 'verificar' || inputs.acao }}
 
 jobs:

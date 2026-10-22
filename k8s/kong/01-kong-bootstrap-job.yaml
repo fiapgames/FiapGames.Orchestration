@@ -80,6 +80,12 @@ spec:
           envFrom:
             - configMapRef:
                 name: kong-db-config
+          env:
+            - name: KONG_PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: infra-credentials
+                  key: kong-db-password
       containers:
         - name: seed
           image: kong:3.9
@@ -101,13 +107,25 @@ spec:
           # routing/JWT/rate-limiting load normally regardless of New Relic being set up.
           args:
             - |
-              sed "s|<NEW_RELIC_LICENSE_KEY>|${NEW_RELIC_LICENSE_KEY:-license-key-not-configured}|g" \
+              sed -e "s|<NEW_RELIC_LICENSE_KEY>|${NEW_RELIC_LICENSE_KEY:-license-key-not-configured}|g" \
+                -e "s|<JWT_SECRET_KEY>|${JWT_SECRET_KEY}|g" \
                 /kong/declarative/kong.yml.template > /tmp/kong.yml
               kong config db_import /tmp/kong.yml
           envFrom:
             - configMapRef:
                 name: kong-db-config
           env:
+            - name: KONG_PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: infra-credentials
+                  key: kong-db-password
+            # Same key the UsersAPI signs tokens with; never written in kong.k8s.yml.
+            - name: JWT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: infra-credentials
+                  key: jwt-secret-key
             - name: NEW_RELIC_LICENSE_KEY
               valueFrom:
                 secretKeyRef:

@@ -56,7 +56,10 @@ spec:
             - name: POSTGRES_USER
               value: "fiapgames-admin"
             - name: POSTGRES_PASSWORD
-              value: "FiapGames@Admin123"
+              valueFrom:
+                secretKeyRef:
+                  name: infra-credentials
+                  key: postgres-password
             - name: POSTGRES_MULTIPLE_DATABASES
               value: "fiapgames-payments"
           ports:

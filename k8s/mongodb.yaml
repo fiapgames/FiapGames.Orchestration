@@ -24,7 +24,10 @@ spec:
             - name: MONGO_INITDB_ROOT_USERNAME
               value: "fiapgames-admin"
             - name: MONGO_INITDB_ROOT_PASSWORD
-              value: "FiapGames@Admin123"
+              valueFrom:
+                secretKeyRef:
+                  name: infra-credentials
+                  key: mongo-password
           ports:
             - containerPort: 27017
           readinessProbe:
