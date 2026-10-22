@@ -680,12 +680,12 @@ kubectl delete pod os-tunnel -n fiapgames
 
 ## Pipeline de CI/CD (GitHub Actions)
 
-O workflow `deploy-prod` fica em `.github/workflows/deploy-prod.yml` do **Users** e do **Catalog**, os dois serviços que o enunciado exige:
+O workflow `deploy-prod` fica em `.github/workflows/deploy-prod.yml` do **Users**, do **Catalog** e do **Payments**. O enunciado exige só os dois primeiros; o Payments tem o mesmo workflow porque participa do fluxo de compra e, sem ele, ficaria preso à primeira imagem publicada no ECR:
 
 | Evento | Passos |
 |---|---|
 | todo push e PR | Build & Test (`dotnet test`), imagem Docker com a tag do commit, scan do Trivy (só relatório) |
-| push na `main` | + login no ECR por OIDC, push da imagem e deploy no EKS com rolling update |
+| push na `main` | + login no ECR por OIDC, push da imagem e deploy no EKS com rolling update. Sem a variável `AWS_ROLE_ARN`, o deploy é pulado com um aviso e a pipeline termina verde |
 
 O deploy não é escrito no workflow: ele chama o `ci/deploy.sh` deste repositório, que o workflow baixa do GitHub (`ref: main`). O mesmo script serve ao Kind, então o passo de deploy é testado localmente antes de existir a conta da AWS. Ele aplica os manifestos de `k8s/` do serviço trocando a imagem, recria Jobs (o template deles é imutável), espera o rolling update e pula o objeto `Namespace`, que a role do GitHub não pode criar. No primeiro deploy ele cria tudo; nos seguintes, só troca a imagem.
 
