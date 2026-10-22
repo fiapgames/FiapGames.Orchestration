@@ -22,7 +22,10 @@ spec:
             - name: RABBITMQ_DEFAULT_USER
               value: "fiapgames-admin"
             - name: RABBITMQ_DEFAULT_PASS
-              value: "FiapGames@Admin123"
+              valueFrom:
+                secretKeyRef:
+                  name: infra-credentials
+                  key: rabbitmq-password
           ports:
             - name: amqp
               containerPort: 5672

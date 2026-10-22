@@ -1,7 +1,7 @@
 # Liga e desliga o ambiente da AWS por botão, e desliga sozinho quando ninguém
 # usa o gateway por AUTO_OFF_IDLE_MINUTES (padrão 60). Roda nos servidores do
 # GitHub, então desliga mesmo com todos os computadores do grupo desligados.
-name: Ambiente AWS
+name: deploy-prod
 
 on:
   workflow_dispatch:
@@ -21,7 +21,7 @@ permissions:
 # Ligar e desligar nunca rodam juntos. A verificação agendada tem grupo próprio
 # para não cancelar um "desligar" que esteja na fila.
 concurrency:
-  group: ${{ github.event_name == 'schedule' && 'ambiente-aws-check' || 'ambiente-aws' }}
+  group: ${{ github.event_name == 'schedule' && 'deploy-prod-check' || 'deploy-prod' }}
   cancel-in-progress: false
 
 env:
@@ -29,7 +29,11 @@ env:
   IDLE_MINUTES: ${{ vars.AUTO_OFF_IDLE_MINUTES || '60' }}
   EKS_ADMIN_ARN: ${{ vars.EKS_ADMIN_ARN }}
   BUDGET_EMAIL: ${{ vars.BUDGET_EMAIL }}
+  # Chaves externas e o login da Konga vêm dos Secrets do repositório; as senhas
+  # internas (bancos, RabbitMQ, JWT) o ci/secrets.sh gera a cada "ligar".
   NOTIFICATIONS_FUNCTION_KEY: ${{ secrets.NOTIFICATIONS_FUNCTION_KEY }}
+  NEW_RELIC_LICENSE_KEY: ${{ secrets.NEW_RELIC_LICENSE_KEY }}
+  KONGA_ADMIN_PASSWORD: ${{ secrets.KONGA_ADMIN_PASSWORD }}
   ACAO: ${{ github.event_name == 'schedule' && 'verificar' || inputs.acao }}
 
 jobs:

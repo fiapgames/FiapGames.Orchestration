@@ -146,6 +146,15 @@ cmd_bootstrap() {
   kube apply -f k8s/namespace.yaml
   # Conta o tempo do bootstrap como uso, para o desligamento automático não agir no meio dele.
   KUBE_CONTEXT="$CONTEXT" ci/idle-check.sh touch
+
+  step "Secrets"
+  # No GitHub vêm dos Secrets do repositório; o que faltar é gerado e fica só no cluster.
+  # Localmente, só as chaves externas saem do .env: as senhas da AWS nunca são as do Kind.
+  local var
+  for var in NOTIFICATIONS_FUNCTION_KEY NEW_RELIC_LICENSE_KEY; do
+    [ -n "${!var:-}" ] || export "$var=$(grep -s "^${var}=" .env | tr -d '\r' | cut -d= -f2- || true)"
+  done
+  KUBE_CONTEXT="$CONTEXT" ci/secrets.sh apply
   kube apply -f k8s/
 
   step "API Gateway (Kong + Konga)"
@@ -163,16 +172,6 @@ cmd_bootstrap() {
     KUBE_CONTEXT="$CONTEXT" ci/deploy.sh "$WORKSPACE/$repo/k8s" "$placeholder" \
       "$(service_image "$name" "$repo" "$context" "$registry")"
   done
-
-  # A chave da Azure Function nunca é versionada: vem do ambiente ou do .env.
-  local key="${NOTIFICATIONS_FUNCTION_KEY:-$(grep -s '^NOTIFICATIONS_FUNCTION_KEY=' .env | cut -d= -f2- || true)}"
-  if [ -n "$key" ]; then
-    for secret in payments-api-secrets user-api-secret; do
-      kube patch secret "$secret" -n "$NAMESPACE" --type merge \
-        -p "{\"stringData\":{\"Notifications__FunctionKey\":\"${key}\"}}" >/dev/null
-    done
-    kube rollout restart deployment/payments-api deployment/user-api -n "$NAMESPACE" >/dev/null
-  fi
 
   KUBE_CONTEXT="$CONTEXT" ci/idle-check.sh touch
 }

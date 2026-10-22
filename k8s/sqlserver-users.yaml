@@ -24,12 +24,15 @@ spec:
             - name: ACCEPT_EULA
               value: "Y"
             - name: MSSQL_SA_PASSWORD
-              value: "RootPassword123!"
+              valueFrom:
+                secretKeyRef:
+                  name: infra-credentials
+                  key: sqlserver-users-password
           ports:
             - containerPort: 1433
           readinessProbe:
             exec:
-              command: ["/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", "RootPassword123!", "-C", "-Q", "SELECT 1"]
+              command: ["/bin/sh", "-c", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$MSSQL_SA_PASSWORD\" -C -Q 'SELECT 1'"]
             initialDelaySeconds: 20
             periodSeconds: 10
             timeoutSeconds: 10

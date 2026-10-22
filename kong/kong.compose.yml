@@ -154,9 +154,9 @@ services:
 # (Jwt__SecretKey) — o .NET usa Encoding.UTF8.GetBytes e o Kong trata igual,
 # sem decodificar base64.
 #
-# O segredo vai literal aqui porque o Kong Vault não funciona para os atributos
-# do plugin JWT. É a mesma chave de desenvolvimento já presente no
-# docker-compose.yml (users-api -> Jwt__SecretKey).
+# O Kong Vault não funciona para os atributos do plugin JWT, então o segredo
+# entra por substituição: o bootstrap troca <JWT_SECRET_KEY> pela mesma chave
+# que o UsersAPI usa, vinda do Secret ou do .env. Ela nunca fica escrita aqui.
 # -----------------------------------------------------------------------------
 consumers:
   - username: fiapgames-users-api
@@ -170,7 +170,7 @@ consumers:
       - id: fc900000-0000-4000-8000-000000000001
         key: "User.Games.Fiap"
         algorithm: HS256
-        secret: "dev-only-change-this-secret-key-32-bytes-minimum"
+        secret: "<JWT_SECRET_KEY>"
 
 # -----------------------------------------------------------------------------
 # Políticas globais — valem para todas as rotas.

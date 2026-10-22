@@ -53,7 +53,13 @@ spec:
             - "-a"
             - "postgres"
             - "-u"
-            - "postgresql://kong:kong@postgres-kong.fiapgames.svc.cluster.local:5432/konga"
+            - "postgresql://kong:$(KONG_DB_PASSWORD)@postgres-kong.fiapgames.svc.cluster.local:5432/konga"
+          env:
+            - name: KONG_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: infra-credentials
+                  key: kong-db-password
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -98,13 +104,19 @@ spec:
             - name: DB_USER
               value: "kong"
             - name: DB_PASSWORD
-              value: "kong"
+              valueFrom:
+                secretKeyRef:
+                  name: infra-credentials
+                  key: kong-db-password
             - name: NODE_ENV
               value: "production"
             # Signs Konga's own session tokens (its login is separate from the
-            # JWT the gateway validates). Local-only throwaway value.
+            # JWT the gateway validates).
             - name: TOKEN_SECRET
-              value: "konga"
+              valueFrom:
+                secretKeyRef:
+                  name: infra-credentials
+                  key: konga-token-secret
           ports:
             - name: http
               containerPort: 1337

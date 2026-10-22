@@ -50,7 +50,10 @@ spec:
             - name: POSTGRES_USER
               value: "kong"
             - name: POSTGRES_PASSWORD
-              value: "kong"
+              valueFrom:
+                secretKeyRef:
+                  name: infra-credentials
+                  key: kong-db-password
             - name: POSTGRES_DB
               value: "kong"
           ports:
