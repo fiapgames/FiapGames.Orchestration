@@ -685,7 +685,7 @@ O workflow `deploy-prod` fica em `.github/workflows/deploy-prod.yml` do **Users*
 | Evento | Passos |
 |---|---|
 | todo push e PR | Build & Test (`dotnet test`), imagem Docker com a tag do commit, scan do Trivy (só relatório) |
-| push na `main` | + login no ECR por OIDC, push da imagem e deploy no EKS com rolling update. Sem a variável `AWS_ROLE_ARN`, o deploy é pulado com um aviso e a pipeline termina verde |
+| push na `main` | + login no ECR por OIDC, push da imagem e deploy no EKS com rolling update. Sem a AWS configurada (`AWS_ROLE_ARN`), esse passo falha de propósito, como lembrete |
 
 O deploy não é escrito no workflow: ele chama o `ci/deploy.sh` deste repositório, que o workflow baixa do GitHub (`ref: main`). O mesmo script serve ao Kind, então o passo de deploy é testado localmente antes de existir a conta da AWS. Ele aplica os manifestos de `k8s/` do serviço trocando a imagem, recria Jobs (o template deles é imutável), espera o rolling update e pula o objeto `Namespace`, que a role do GitHub não pode criar. No primeiro deploy ele cria tudo; nos seguintes, só troca a imagem.
 
