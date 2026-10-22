@@ -680,7 +680,7 @@ kubectl delete pod os-tunnel -n fiapgames
 
 ## Pipeline de CI/CD (GitHub Actions)
 
-O workflow fica em `.github/workflows/ci-cd.yml` do **Users** e do **Catalog**, os dois serviços que o enunciado exige:
+O workflow `deploy-prod` fica em `.github/workflows/deploy-prod.yml` do **Users** e do **Catalog**, os dois serviços que o enunciado exige:
 
 | Evento | Passos |
 |---|---|
