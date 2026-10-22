@@ -1,0 +1,63 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: FiapGames - private ECR repositories for the microservice images.
+
+# Same names the local registry uses (aws-local/up.sh), so only the host part
+# of the image reference changes between environments.
+
+Parameters:
+  KeepImages:
+    Type: Number
+    Default: 20
+    Description: How many images each repository keeps before the oldest are expired.
+
+Resources:
+  CatalogApiRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: fiapgames/catalog-api
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EmptyOnDelete: true
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub |
+          {"rules":[{"rulePriority":1,"description":"keep the last ${KeepImages}","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":${KeepImages}},"action":{"type":"expire"}}]}
+
+  UsersApiRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: fiapgames/users-api
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EmptyOnDelete: true
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub |
+          {"rules":[{"rulePriority":1,"description":"keep the last ${KeepImages}","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":${KeepImages}},"action":{"type":"expire"}}]}
+
+  PaymentsApiRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: fiapgames/payments-api
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EmptyOnDelete: true
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub |
+          {"rules":[{"rulePriority":1,"description":"keep the last ${KeepImages}","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":${KeepImages}},"action":{"type":"expire"}}]}
+
+Outputs:
+  RegistryUri:
+    Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+    Export:
+      Name: !Sub ${AWS::StackName}-RegistryUri
+  CatalogApiRepositoryArn:
+    Value: !GetAtt CatalogApiRepository.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-CatalogApiRepositoryArn
+  UsersApiRepositoryArn:
+    Value: !GetAtt UsersApiRepository.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-UsersApiRepositoryArn
+  PaymentsApiRepositoryArn:
+    Value: !GetAtt PaymentsApiRepository.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-PaymentsApiRepositoryArn

@@ -1,0 +1,156 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: FiapGames - EKS cluster and managed node group.
+
+Parameters:
+  NetworkStackName:
+    Type: String
+    Default: fiapgames-network
+  ClusterName:
+    Type: String
+    Default: fiapgames
+  KubernetesVersion:
+    Type: String
+    Default: "1.35"
+    Description: Must be in EKS standard support, otherwise the control plane is billed at six times the price.
+  NodeInstanceType:
+    Type: String
+    Default: t3.large
+    Description: The two SQL Servers alone request 2 GiB; t3.large (8 GiB) leaves room for rolling updates.
+  NodeDesiredSize:
+    Type: Number
+    Default: 2
+  NodeMinSize:
+    Type: Number
+    Default: 1
+  NodeMaxSize:
+    Type: Number
+    Default: 3
+  BaseStackName:
+    Type: String
+    Default: fiapgames-base
+  ExtraAdminArn:
+    Type: String
+    Default: ""
+    Description: IAM user or role of a person who also administers the cluster (kubectl, Headlamp). Empty for none.
+
+Conditions:
+  HasExtraAdmin: !Not [!Equals [!Ref ExtraAdminArn, ""]]
+
+Resources:
+  ClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ClusterName}-eks-cluster
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: eks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+
+  Cluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Ref ClusterName
+      Version: !Ref KubernetesVersion
+      RoleArn: !GetAtt ClusterRole.Arn
+      # Never slide into extended support silently when the version ages out.
+      UpgradePolicy:
+        SupportType: STANDARD
+      # Admins are explicit entries below, so the cluster is the same whether a
+      # person or the GitHub workflow created it.
+      AccessConfig:
+        AuthenticationMode: API
+        BootstrapClusterCreatorAdminPermissions: false
+      ResourcesVpcConfig:
+        SubnetIds:
+          - !ImportValue
+            Fn::Sub: ${NetworkStackName}-PublicSubnetA
+          - !ImportValue
+            Fn::Sub: ${NetworkStackName}-PublicSubnetB
+        EndpointPublicAccess: true
+        EndpointPrivateAccess: true
+
+  NodeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ClusterName}-eks-node
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        # Pulls from ECR without any imagePullSecret in the manifests.
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+
+  NodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      ClusterName: !Ref Cluster
+      NodegroupName: !Sub ${ClusterName}-nodes
+      NodeRole: !GetAtt NodeRole.Arn
+      AmiType: AL2023_x86_64_STANDARD
+      CapacityType: ON_DEMAND
+      InstanceTypes:
+        - !Ref NodeInstanceType
+      DiskSize: 30
+      Subnets:
+        - !ImportValue
+          Fn::Sub: ${NetworkStackName}-PublicSubnetA
+        - !ImportValue
+          Fn::Sub: ${NetworkStackName}-PublicSubnetB
+      ScalingConfig:
+        DesiredSize: !Ref NodeDesiredSize
+        MinSize: !Ref NodeMinSize
+        MaxSize: !Ref NodeMaxSize
+      UpdateConfig:
+        MaxUnavailable: 1
+      Labels:
+        workload: fiapgames
+
+  InfraRoleAccess:
+    Type: AWS::EKS::AccessEntry
+    Properties:
+      ClusterName: !Ref Cluster
+      PrincipalArn: !ImportValue
+        Fn::Sub: ${BaseStackName}-InfraRoleArn
+      AccessPolicies:
+        - PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+          AccessScope:
+            Type: cluster
+
+  ExtraAdminAccess:
+    Type: AWS::EKS::AccessEntry
+    Condition: HasExtraAdmin
+    Properties:
+      ClusterName: !Ref Cluster
+      PrincipalArn: !Ref ExtraAdminArn
+      AccessPolicies:
+        - PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+          AccessScope:
+            Type: cluster
+
+Outputs:
+  ClusterName:
+    Value: !Ref Cluster
+    Export:
+      Name: !Sub ${AWS::StackName}-ClusterName
+  ClusterArn:
+    Value: !GetAtt Cluster.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-ClusterArn
+  ClusterEndpoint:
+    Value: !GetAtt Cluster.Endpoint
+  # Security group EKS attaches to the control plane and to managed nodes.
+  ClusterSecurityGroupId:
+    Value: !GetAtt Cluster.ClusterSecurityGroupId
+    Export:
+      Name: !Sub ${AWS::StackName}-ClusterSecurityGroupId

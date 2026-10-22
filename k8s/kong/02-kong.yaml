@@ -112,8 +112,27 @@ spec:
               cpu: "500m"
               memory: "512Mi"
 ---
-# NodePorts must match the extraPortMappings in kind-config.yaml (repo root), otherwise
-# nothing is reachable from the host.
+# Public entry point: on EKS this provisions an AWS load balancer, on Kind
+# cloud-provider-kind plays that role. The fixed nodePort keeps localhost:8000.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kong-proxy
+  namespace: fiapgames
+  labels:
+    app: kong
+spec:
+  type: LoadBalancer
+  selector:
+    app: kong
+  ports:
+    - name: proxy
+      port: 80
+      targetPort: 8000
+      nodePort: 30000
+---
+# Admin surfaces stay off the load balancer so they never face the internet.
+# NodePorts must match the extraPortMappings in kind-config.yaml (repo root).
 apiVersion: v1
 kind: Service
 metadata:
@@ -126,10 +145,6 @@ spec:
   selector:
     app: kong
   ports:
-    - name: proxy
-      port: 8000
-      targetPort: 8000
-      nodePort: 30000
     - name: admin
       port: 8001
       targetPort: 8001

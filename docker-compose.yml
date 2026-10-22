@@ -131,6 +131,39 @@ services:
     volumes:
       - redis-data:/data
 
+  # Busca do Catalog (item 3 da Fase 4). Faz o papel do Amazon OpenSearch
+  # Service: mesma versão do domínio na AWS, sem TLS nem senha localmente.
+  opensearch:
+    image: opensearchproject/opensearch:2.19.4
+    container_name: fiapgames-opensearch
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+
+  # Equivalente ao OpenSearch Dashboards que o domínio da AWS já traz.
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.19.4
+    container_name: fiapgames-opensearch-dashboards
+    depends_on:
+      opensearch:
+        condition: service_healthy
+    environment:
+      OPENSEARCH_HOSTS: '["http://opensearch:9200"]'
+      DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"
+    ports:
+      - "5601:5601"
+
   catalog-api:
     build:
       context: ../FiapGames.Catalog
@@ -458,3 +491,4 @@ volumes:
   postgres-kong-data:
   mongodb-data:
   redis-data:
+  opensearch-data:

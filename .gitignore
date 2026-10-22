@@ -13,3 +13,7 @@
 *.log
 
 .DS_Store
+
+# Tags das imagens do último build do ambiente local da AWS
+aws-local/.tags
+aws-local/.bin/
