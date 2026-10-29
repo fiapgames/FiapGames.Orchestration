@@ -614,7 +614,7 @@ As stacks se dividem em dois grupos. As **permanentes** não cobram por hora e s
 | `fiapgames-ecr` | `02-ecr.yaml` | permanente | `fiapgames/catalog-api`, `fiapgames/users-api`, `fiapgames/payments-api`, com scan no push e expiração após 20 imagens. Permanente para as imagens sobreviverem ao `down` |
 | `fiapgames-budget` | `06-budget.yaml` | permanente | alerta de custo por e-mail (só com `BUDGET_EMAIL`) |
 | `fiapgames-network` | `01-network.yaml` | ambiente | VPC `10.20.0.0/16`, 2 subnets públicas, internet gateway. Sem NAT Gateway, que custaria quase metade do control plane |
-| `fiapgames-eks` | `03-eks.yaml` | ambiente | EKS 1.35 (preso ao suporte padrão), 2× `t3.large`, acesso de admin para a role de infra e para `EKS_ADMIN_ARN` |
+| `fiapgames-eks` | `03-eks.yaml` | ambiente | EKS 1.35 (preso ao suporte padrão), 2× `m7i-flex.large` (2 vCPU, 8 GiB; no plano Free da AWS só sobem tipos elegíveis ao Free Tier, e esse é o único com 8 GiB), acesso de admin para a role de infra e para `EKS_ADMIN_ARN` |
 | `fiapgames-opensearch` | `04-opensearch.yaml` | ambiente | OpenSearch 2.19, 1 nó `t3.small.search`, 10 GiB, dentro da VPC, HTTPS só a partir do cluster |
 | `fiapgames-github` | `05-github-actions.yaml` | ambiente | role `fiapgames-github-actions` da pipeline: push no ECR e edição só do namespace `fiapgames` |
 

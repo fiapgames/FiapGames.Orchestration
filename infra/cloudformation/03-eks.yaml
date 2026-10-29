@@ -14,8 +14,8 @@ Parameters:
     Description: Must be in EKS standard support, otherwise the control plane is billed at six times the price.
   NodeInstanceType:
     Type: String
-    Default: t3.large
-    Description: The two SQL Servers alone request 2 GiB; t3.large (8 GiB) leaves room for rolling updates.
+    Default: m7i-flex.large
+    Description: The two SQL Servers alone request 2 GiB, so 8 GiB nodes leave room for rolling updates. Accounts on the AWS Free plan only launch free-tier-eligible types; m7i-flex.large is the one with 8 GiB.
   NodeDesiredSize:
     Type: Number
     Default: 2
