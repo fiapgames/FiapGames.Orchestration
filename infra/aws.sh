@@ -121,6 +121,14 @@ cmd_plan() {
   done < <(permanent_stacks; env_stacks)
 }
 
+# Push por um docker CLI em container: no Windows o cofre de credenciais recusa o
+# token do ECR, grande demais para ele. Funciona igual no Linux e no Mac.
+ecr_push() {
+  ECR_TOKEN="$(aws ecr get-login-password)" MSYS_NO_PATHCONV=1 docker run --rm -e ECR_TOKEN \
+    -v /var/run/docker.sock:/var/run/docker.sock docker:27.5.1-cli \
+    sh -c 'echo "$ECR_TOKEN" | docker login -u AWS --password-stdin "${0%%/*}" >/dev/null && docker push "$0"' "$1"
+}
+
 # Última imagem publicada no ECR; sem nenhuma, builda a partir do repositório ao lado.
 service_image() {
   local name="$1" repo="$2" context="$3" registry="$4" tag
@@ -130,7 +138,7 @@ service_image() {
     tag="$(image_tag "$WORKSPACE/$repo")"
     step "ECR vazio para ${name}: build de ${repo}" >&2
     docker build -t "${registry}/fiapgames/${name}:${tag}" "$WORKSPACE/$repo/$context" >&2
-    docker push "${registry}/fiapgames/${name}:${tag}" >&2
+    ecr_push "${registry}/fiapgames/${name}:${tag}" >&2
   fi
   echo "${registry}/fiapgames/${name}:${tag}"
 }
@@ -166,7 +174,6 @@ cmd_bootstrap() {
   step "Microsserviços (última imagem do ECR)"
   local registry
   registry="$(stack_output "${PREFIX}-ecr" RegistryUri)"
-  aws ecr get-login-password | docker login --username AWS --password-stdin "$registry" >/dev/null
   for entry in "${SERVICES[@]}"; do
     IFS='|' read -r name repo context _ placeholder <<<"$entry"
     KUBE_CONTEXT="$CONTEXT" ci/deploy.sh "$WORKSPACE/$repo/k8s" "$placeholder" \
