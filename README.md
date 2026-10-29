@@ -667,7 +667,7 @@ O log de cada execução fica no CloudWatch, em `/aws/lambda/fiapgames-auto-off`
 | `AWS_REGION` | variável | `us-east-2` |
 | `EKS_ADMIN_ARN` | variável | ARN do seu usuário IAM, para manter seu acesso ao cluster quando o GitHub religar |
 | `AUTO_OFF_IDLE_MINUTES` | variável | opcional, padrão `10`; aplicado a cada *ligar* |
-| `BUDGET_EMAIL` | variável | opcional, e-mail do alerta de custo |
+| `BUDGET_EMAIL` | secret | opcional, e-mail do alerta de custo. Secret porque variável aparece no log público |
 | `NOTIFICATIONS_FUNCTION_KEY` | secret | chave da Azure Function de notificações |
 | `NEW_RELIC_LICENSE_KEY` | secret | opcional, liga a observabilidade |
 | `KONGA_ADMIN_PASSWORD` | secret | opcional, senha de login da Konga; sem ele é gerada |
