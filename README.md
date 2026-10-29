@@ -32,12 +32,12 @@ FiapGames.Orchestration/
 │   └── opensearch.yaml         papel do Amazon OpenSearch (não vai para o EKS)
 ├── ci/                         passo de deploy da pipeline (Fase 4)
 │   ├── deploy.sh               aplica os manifestos de um serviço com a imagem nova (EKS e Kind)
-│   ├── idle-check.sh           mede se o ambiente está ocioso (desligamento automático)
 │   ├── secrets.sh              cria os Secrets do Kubernetes a partir do .env ou dos GitHub Secrets
 │   ├── services.sh             lista dos microsserviços, usada pelos scripts
 │   └── simulate-pipeline.sh    roda os passos do workflow localmente, contra o Kind
 ├── infra/                      infraestrutura da AWS (Fase 4)
-│   ├── aws.sh                  lint / plan / up / down / idle-check / keep-alive / outputs / destroy
+│   ├── aws.sh                  lint / plan / up / down / keep-alive / outputs / destroy
+│   ├── lambda/auto_off.py      desligamento automático, roda na própria AWS
 │   └── cloudformation/         uma stack por template, na ordem do prefixo
 ├── kong/                       configuração declarativa do gateway
 │   ├── kong.k8s.yml            rotas + políticas (canônico, ambiente Kubernetes)
@@ -613,8 +613,9 @@ As stacks se dividem em dois grupos. As **permanentes** não cobram por hora e s
 | `fiapgames-base` | `00-base.yaml` | permanente | provedor OIDC do GitHub e a role `fiapgames-github-infra`, que liga e desliga o ambiente. Só o workflow da `main` deste repositório pode usá-la |
 | `fiapgames-ecr` | `02-ecr.yaml` | permanente | `fiapgames/catalog-api`, `fiapgames/users-api`, `fiapgames/payments-api`, com scan no push e expiração após 20 imagens. Permanente para as imagens sobreviverem ao `down` |
 | `fiapgames-budget` | `06-budget.yaml` | permanente | alerta de custo por e-mail (só com `BUDGET_EMAIL`) |
+| `fiapgames-auto-off` | `07-auto-off.yaml` | permanente | Lambda que desliga o ambiente sem uso, acionada a cada 5 min pelo EventBridge Scheduler |
 | `fiapgames-network` | `01-network.yaml` | ambiente | VPC `10.20.0.0/16`, 2 subnets públicas, internet gateway. Sem NAT Gateway, que custaria quase metade do control plane |
-| `fiapgames-eks` | `03-eks.yaml` | ambiente | EKS 1.35 (preso ao suporte padrão), 2× `t3.large`, acesso de admin para a role de infra e para `EKS_ADMIN_ARN` |
+| `fiapgames-eks` | `03-eks.yaml` | ambiente | EKS 1.35 (preso ao suporte padrão), 2× `m7i-flex.large` (2 vCPU, 8 GiB; no plano Free da AWS só sobem tipos elegíveis ao Free Tier, e esse é o único com 8 GiB), acesso de admin para a role de infra e para `EKS_ADMIN_ARN` |
 | `fiapgames-opensearch` | `04-opensearch.yaml` | ambiente | OpenSearch 2.19, 1 nó `t3.small.search`, 10 GiB, dentro da VPC, HTTPS só a partir do cluster |
 | `fiapgames-github` | `05-github-actions.yaml` | ambiente | role `fiapgames-github-actions` da pipeline: push no ECR e edição só do namespace `fiapgames` |
 
@@ -623,7 +624,6 @@ As stacks se dividem em dois grupos. As **permanentes** não cobram por hora e s
 ./infra/aws.sh plan          # valida na AWS e mostra o change set das stacks existentes
 ./infra/aws.sh up            # liga: stacks + infra compartilhada + Kong + as 3 APIs (~35 min do zero)
 ./infra/aws.sh down          # desliga: apaga as stacks do ambiente
-./infra/aws.sh idle-check    # desliga se ninguém usou o gateway nos últimos IDLE_MINUTES (padrão 60)
 ./infra/aws.sh keep-alive    # zera o contador de ociosidade
 ./infra/aws.sh outputs       # registry, roles do GitHub, endpoint do OpenSearch
 ./infra/aws.sh destroy       # down + apaga também as permanentes
@@ -642,13 +642,22 @@ aws eks associate-access-policy --cluster-name fiapgames --principal-arn <arn-do
 
 ### Ligar, desligar e desligamento automático
 
-O workflow `.github/workflows/deploy-prod.yml` deste repositório tem três botões em *Actions → deploy-prod → Run workflow*: **ligar**, **desligar** e **manter-ligado**. A cada 15 minutos ele também verifica o uso e **desliga sozinho quando ninguém usou o gateway por `AUTO_OFF_IDLE_MINUTES`** (padrão 60). Roda nos servidores do GitHub, então funciona com todos os computadores do grupo desligados.
+O workflow `.github/workflows/deploy-prod.yml` deste repositório tem três botões em *Actions → deploy-prod → Run workflow*: **ligar**, **desligar** e **manter-ligado**.
 
-Conta como uso: qualquer requisição pelo Kong, exceto health checks (uma aba esquecida no navegador não segura o ambiente ligado), e qualquer deploy novo no cluster. O estado fica no ConfigMap `auto-off` do namespace `fiapgames` e some junto com o cluster. Se o uso não puder ser medido (Kong fora do ar, bootstrap incompleto), vale a idade do cluster. Uma verificação que encontra uma stack sendo criada ou apagada espera a rodada seguinte. A lógica está em `ci/idle-check.sh` e pode ser testada contra o Kind:
+O **desligamento automático roda dentro da AWS**, não no GitHub: o GitHub atrasa por horas os agendamentos de repositório com pouca atividade. A stack `fiapgames-auto-off` tem uma Lambda (`infra/lambda/auto_off.py`) que o EventBridge Scheduler aciona a cada 5 minutos. Quando ninguém usa o ambiente por `IDLE_MINUTES` (variável `AUTO_OFF_IDLE_MINUTES`, padrão 10), ela apaga as stacks do ambiente, um passo por execução: `github` e `opensearch`, depois `eks`, depois o load balancer do Kong e a `network`. Na prática, desliga entre 10 e 15 minutos depois do último uso e termina de apagar em uns 30 a 40 minutos.
+
+Conta como uso:
+- requisição pelo Kong em rota existente, exceto health checks (uma aba esquecida no navegador não segura o ambiente ligado, nem os robôs que varrem endereços públicos);
+- imagem nova no ECR, ou seja, deploy da pipeline;
+- qualquer operação do `infra/aws.sh` (`up`, bootstrap, `keep-alive`), que grava o horário em `/fiapgames/auto-off/last-activity` no SSM Parameter Store.
+
+Uma execução que encontra uma stack sendo criada ou apagada espera a próxima. Para testar sem apagar nada:
 
 ```bash
-KUBE_CONTEXT=kind-fiapgames ci/idle-check.sh check 60   # sai com 10 se está ocioso
+aws lambda invoke --function-name fiapgames-auto-off --payload '{"dryRun": true}' --cli-binary-format raw-in-base64-out /dev/stdout
 ```
+
+O log de cada execução fica no CloudWatch, em `/aws/lambda/fiapgames-auto-off`.
 
 **Configuração no GitHub** (*Settings → Secrets and variables → Actions* deste repositório):
 
@@ -657,13 +666,13 @@ KUBE_CONTEXT=kind-fiapgames ci/idle-check.sh check 60   # sai com 10 se está oc
 | `AWS_INFRA_ROLE_ARN` | variável | `InfraRoleArn` do `./infra/aws.sh outputs`. Sem ela o workflow não faz nada |
 | `AWS_REGION` | variável | `us-east-2` |
 | `EKS_ADMIN_ARN` | variável | ARN do seu usuário IAM, para manter seu acesso ao cluster quando o GitHub religar |
-| `AUTO_OFF_IDLE_MINUTES` | variável | opcional, padrão `60` |
-| `BUDGET_EMAIL` | variável | opcional, e-mail do alerta de custo |
+| `AUTO_OFF_IDLE_MINUTES` | variável | opcional, padrão `10`; aplicado a cada *ligar* |
+| `BUDGET_EMAIL` | secret | opcional, e-mail do alerta de custo. Secret porque variável aparece no log público |
 | `NOTIFICATIONS_FUNCTION_KEY` | secret | chave da Azure Function de notificações |
 | `NEW_RELIC_LICENSE_KEY` | secret | opcional, liga a observabilidade |
 | `KONGA_ADMIN_PASSWORD` | secret | opcional, senha de login da Konga; sem ele é gerada |
 
-Dois cuidados do GitHub: agendamentos só rodam a partir da `main`, e ele pausa workflows agendados de repositório público depois de 60 dias sem nenhum commit. O alerta de orçamento por e-mail continua como última proteção.
+O alerta de orçamento por e-mail continua como última proteção.
 
 **Para o CI/CD.** O `outputs` mostra `DeployRoleArn` (vai em `AWS_ROLE_ARN`, ver [Pipeline de CI/CD](#pipeline-de-cicd-github-actions)) e `RegistryUri`. Só workflows rodando na `main` dos repositórios da organização `fiapgames` conseguem assumir essa role, o que garante que a `main` é o que está em produção.
 

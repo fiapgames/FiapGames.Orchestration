@@ -1,6 +1,6 @@
-# Liga e desliga o ambiente da AWS por botão, e desliga sozinho quando ninguém
-# usa o gateway por AUTO_OFF_IDLE_MINUTES (padrão 60). Roda nos servidores do
-# GitHub, então desliga mesmo com todos os computadores do grupo desligados.
+# Liga e desliga o ambiente da AWS por botão. O desligamento automático roda na
+# própria AWS (stack fiapgames-auto-off); aqui AUTO_OFF_IDLE_MINUTES só define o
+# tempo sem uso que ele espera, aplicado a cada "ligar".
 name: deploy-prod
 
 on:
@@ -11,35 +11,33 @@ on:
         type: choice
         options: [ligar, desligar, manter-ligado]
         default: ligar
-  schedule:
-    - cron: "*/15 * * * *"
 
 permissions:
   contents: read
   id-token: write
 
-# Ligar e desligar nunca rodam juntos. A verificação agendada tem grupo próprio
-# para não cancelar um "desligar" que esteja na fila.
+# Ligar e desligar nunca rodam juntos.
 concurrency:
-  group: ${{ github.event_name == 'schedule' && 'deploy-prod-check' || 'deploy-prod' }}
+  group: deploy-prod
   cancel-in-progress: false
 
 env:
   AWS_REGION: ${{ vars.AWS_REGION }}
-  IDLE_MINUTES: ${{ vars.AUTO_OFF_IDLE_MINUTES || '60' }}
+  IDLE_MINUTES: ${{ vars.AUTO_OFF_IDLE_MINUTES || '10' }}
   EKS_ADMIN_ARN: ${{ vars.EKS_ADMIN_ARN }}
-  BUDGET_EMAIL: ${{ vars.BUDGET_EMAIL }}
   # Chaves externas e o login da Konga vêm dos Secrets do repositório; as senhas
   # internas (bancos, RabbitMQ, JWT) o ci/secrets.sh gera a cada "ligar".
   NOTIFICATIONS_FUNCTION_KEY: ${{ secrets.NOTIFICATIONS_FUNCTION_KEY }}
   NEW_RELIC_LICENSE_KEY: ${{ secrets.NEW_RELIC_LICENSE_KEY }}
   KONGA_ADMIN_PASSWORD: ${{ secrets.KONGA_ADMIN_PASSWORD }}
-  ACAO: ${{ github.event_name == 'schedule' && 'verificar' || inputs.acao }}
+  # Secret, não variável: o repositório é público e variável aparece no log.
+  BUDGET_EMAIL: ${{ secrets.BUDGET_EMAIL }}
+  ACAO: ${{ inputs.acao }}
 
 jobs:
   ambiente:
     # Sem a base na AWS ainda, não há o que ligar nem desligar. Só um ARN de
-    # verdade libera o job: vazio ou valor provisório não dispara falha a cada 15 min.
+    # verdade libera o job: vazio ou valor provisório não dispara falha.
     if: startsWith(vars.AWS_INFRA_ROLE_ARN, 'arn:aws:iam::')
     runs-on: ubuntu-latest
     timeout-minutes: 100
@@ -77,5 +75,4 @@ jobs:
             ligar) infra/aws.sh up ;;
             desligar) infra/aws.sh down ;;
             manter-ligado) infra/aws.sh keep-alive ;;
-            verificar) infra/aws.sh idle-check ;;
           esac
