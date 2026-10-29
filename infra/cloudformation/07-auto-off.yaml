@@ -1,0 +1,110 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: FiapGames - turns the environment off inside AWS when nobody uses it.
+
+# Permanent stack: a scheduled Lambda (code in infra/lambda/auto_off.py) checks
+# for use and, after IdleMinutes without any, deletes the environment stacks.
+# It replaces the GitHub schedule, which GitHub runs hours late on quiet repos.
+# infra/aws.sh uploads the real code right after deploying this stack.
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: fiapgames
+  ClusterName:
+    Type: String
+    Default: fiapgames
+  Namespace:
+    Type: String
+    Default: fiapgames
+  IdleMinutes:
+    Type: Number
+    Default: 10
+    MinValue: 5
+  CheckEveryMinutes:
+    Type: Number
+    Default: 5
+    MinValue: 1
+
+Resources:
+  # Deleting the stacks means deleting EKS, OpenSearch, the VPC and IAM roles, so
+  # the function needs the same reach as whoever created them.
+  FunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Prefix}-auto-off
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${Prefix}-auto-off
+      RetentionInDays: 14
+
+  Function:
+    Type: AWS::Lambda::Function
+    DependsOn: LogGroup
+    Properties:
+      FunctionName: !Sub ${Prefix}-auto-off
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 60
+      MemorySize: 128
+      Role: !GetAtt FunctionRole.Arn
+      Environment:
+        Variables:
+          PREFIX: !Ref Prefix
+          CLUSTER: !Ref ClusterName
+          NAMESPACE: !Ref Namespace
+          IDLE_MINUTES: !Ref IdleMinutes
+      # Placeholder until infra/aws.sh uploads infra/lambda/auto_off.py.
+      Code:
+        ZipFile: |
+          def handler(event, context):
+              return "sem código ainda: rode infra/aws.sh up"
+
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: invoke-auto-off
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt Function.Arn
+
+  Schedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub ${Prefix}-auto-off
+      ScheduleExpression: !Sub rate(${CheckEveryMinutes} minutes)
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Target:
+        Arn: !GetAtt Function.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+
+Outputs:
+  FunctionName:
+    Value: !Ref Function
+  FunctionRoleArn:
+    Description: Gets admin on the application namespace in 03-eks to read the Kong metrics.
+    Value: !GetAtt FunctionRole.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-FunctionRoleArn

@@ -17,3 +17,6 @@
 # Tags das imagens do último build do ambiente local da AWS
 aws-local/.tags
 aws-local/.bin/
+
+# Pacote da Lambda de desligamento automático, gerado pelo infra/aws.sh
+infra/lambda/.build/

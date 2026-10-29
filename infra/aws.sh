@@ -5,12 +5,12 @@
 #   ./infra/aws.sh plan          # valida na AWS e mostra o change set das stacks que já existem
 #   ./infra/aws.sh up            # liga: stacks + infra compartilhada + apps (~35 min do zero)
 #   ./infra/aws.sh down          # desliga: apaga tudo que cobra por hora
-#   ./infra/aws.sh idle-check    # desliga se ninguém usou nos últimos IDLE_MINUTES (padrão 60)
-#   ./infra/aws.sh keep-alive    # zera o contador de ociosidade
+#   ./infra/aws.sh keep-alive    # conta como uso agora (adia o desligamento automático)
 #   ./infra/aws.sh outputs       # endpoints, registry e roles do GitHub
 #   ./infra/aws.sh destroy       # down + apaga também a base permanente (ECR, roles, budget)
 #
 # BUDGET_EMAIL=voce@exemplo.com  inclui o alerta de custo
+# IDLE_MINUTES=10                minutos sem uso até o desligamento automático (stack auto-off)
 # EKS_ADMIN_ARN=arn:...          pessoa com acesso de admin ao cluster (padrão: o usuário IAM atual)
 set -euo pipefail
 shopt -s inherit_errexit
@@ -54,6 +54,7 @@ eks_admin_arn() {
 permanent_stacks() {
   echo "${PREFIX}-base|00-base.yaml|"
   echo "${PREFIX}-ecr|02-ecr.yaml|"
+  echo "${PREFIX}-auto-off|07-auto-off.yaml|ClusterName=${CLUSTER} Namespace=${NAMESPACE}${IDLE_MINUTES:+ IdleMinutes=${IDLE_MINUTES}}"
   [ -n "${BUDGET_EMAIL:-}" ] && echo "${PREFIX}-budget|06-budget.yaml|AlertEmail=${BUDGET_EMAIL}"
   return 0
 }
@@ -68,13 +69,40 @@ env_stacks() {
   echo "${PREFIX}-github|05-github-actions.yaml|EcrStackName=${PREFIX}-ecr EksStackName=${PREFIX}-eks Namespace=${NAMESPACE}"
 }
 
+# No Git Bash, nomes do SSM como /fiapgames/... não podem virar caminho do Windows.
+ssm() { MSYS_NO_PATHCONV=1 aws ssm "$@"; }
+
+# Marca uso agora, para o desligamento automático não agir no meio de uma operação.
+touch_activity() {
+  ssm put-parameter --name "/${PREFIX}/auto-off/last-activity" --value "$(date +%s)"     --type String --overwrite >/dev/null
+}
+
+# O CloudFormation cria a função com um código provisório; o de verdade sobe daqui.
+upload_auto_off() {
+  # Caminho relativo: no Windows o python e o aws.exe não enxergam o /tmp do Git Bash.
+  local zip=infra/lambda/.build/auto_off.zip py
+  mkdir -p "$(dirname "$zip")"
+  for py in python3 python; do "$py" -c "import zipfile" 2>/dev/null && break; done
+  # Entra como index.py, o mesmo módulo do código provisório do template.
+  "$py" -c "import sys, zipfile; z = zipfile.ZipFile(sys.argv[1], 'w'); z.write(sys.argv[2], 'index.py'); z.close()"     "$zip" infra/lambda/auto_off.py
+  aws lambda update-function-code --function-name "${PREFIX}-auto-off" --zip-file "fileb://${zip}" >/dev/null
+  aws lambda wait function-updated-v2 --function-name "${PREFIX}-auto-off"
+}
+
 deploy_stack() {
   local stack="$1" template="$2" params="$3"
   step "Stack ${stack} (${template})"
+  ssm get-parameter --name "/${PREFIX}/auto-off/last-activity" >/dev/null 2>&1 && touch_activity
   # shellcheck disable=SC2086
   aws cloudformation deploy --stack-name "$stack" --template-file "$TEMPLATES/$template" \
     --capabilities CAPABILITY_NAMED_IAM --no-fail-on-empty-changeset \
     ${params:+--parameter-overrides $params} --tags project=fiapgames
+  if [ "$stack" = "${PREFIX}-auto-off" ]; then
+    upload_auto_off
+    # Ligar agora vence qualquer desligamento que estivesse em curso.
+    ssm put-parameter --name "/${PREFIX}/auto-off/state" --value on --type String --overwrite >/dev/null
+    touch_activity
+  fi
 }
 
 delete_stack() {
@@ -153,7 +181,7 @@ cmd_bootstrap() {
   step "Infraestrutura compartilhada"
   kube apply -f k8s/namespace.yaml
   # Conta o tempo do bootstrap como uso, para o desligamento automático não agir no meio dele.
-  KUBE_CONTEXT="$CONTEXT" ci/idle-check.sh touch
+  touch_activity
 
   step "Secrets"
   # No GitHub vêm dos Secrets do repositório; o que faltar é gerado e fica só no cluster.
@@ -180,7 +208,7 @@ cmd_bootstrap() {
       "$(service_image "$name" "$repo" "$context" "$registry")"
   done
 
-  KUBE_CONTEXT="$CONTEXT" ci/idle-check.sh touch
+  touch_activity
 }
 
 cmd_up() {
@@ -239,39 +267,9 @@ cmd_destroy() {
   delete_stack "${PREFIX}-base"
 }
 
-cmd_idle_check() {
-  local minutes="${IDLE_MINUTES:-60}"
-  local busy
-  busy="$(aws cloudformation describe-stacks \
-    --query "Stacks[?starts_with(StackName,'${PREFIX}-') && ends_with(StackStatus,'IN_PROGRESS')].StackName" --output text)"
-  if [ -n "$busy" ]; then
-    echo "ligando ou desligando agora (${busy}); verifico na próxima rodada"
-    return 0
-  fi
-  if ! aws eks describe-cluster --name "$CLUSTER" >/dev/null 2>&1; then
-    echo "ambiente desligado"
-    return 0
-  fi
-  aws eks update-kubeconfig --name "$CLUSTER" --alias "$CONTEXT" >/dev/null
-  local rc=0
-  KUBE_CONTEXT="$CONTEXT" ci/idle-check.sh check "$minutes" || rc=$?
-  if [ "$rc" -ne 0 ] && [ "$rc" -ne 10 ]; then
-    # Sem como medir uso (cluster sem bootstrap, Kong fora do ar): vale a idade do cluster.
-    local created age
-    created="$(aws eks describe-cluster --name "$CLUSTER" --query cluster.createdAt --output text)"
-    age=$(( $(date +%s) - $(date -d "$created" +%s) ))
-    echo "uso não medido; cluster criado há $(( age / 60 )) min"
-    [ "$age" -ge $(( minutes * 60 )) ] && rc=10
-  fi
-  if [ "$rc" -eq 10 ]; then
-    step "Ocioso há ${minutes} min ou mais: desligando"
-    cmd_down
-  fi
-}
-
 cmd_keep_alive() {
-  aws eks update-kubeconfig --name "$CLUSTER" --alias "$CONTEXT" >/dev/null
-  KUBE_CONTEXT="$CONTEXT" ci/idle-check.sh touch
+  touch_activity
+  echo "uso registrado: o desligamento automático recomeça a contar agora"
 }
 
 cmd_outputs() {
@@ -290,8 +288,7 @@ case "${1:-}" in
   bootstrap) cmd_bootstrap ;;
   down) cmd_down ;;
   destroy) cmd_destroy ;;
-  idle-check) cmd_idle_check ;;
   keep-alive) cmd_keep_alive ;;
   outputs) cmd_outputs ;;
-  *) sed -n '2,15p' "$0"; exit 1 ;;
+  *) sed -n '2,15p' "$0" | grep -v '^$'; exit 1 ;;
 esac

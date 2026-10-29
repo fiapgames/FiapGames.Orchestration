@@ -28,6 +28,9 @@ Parameters:
   BaseStackName:
     Type: String
     Default: fiapgames-base
+  AutoOffStackName:
+    Type: String
+    Default: fiapgames-auto-off
   ExtraAdminArn:
     Type: String
     Default: ""
@@ -126,6 +129,20 @@ Resources:
         - PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
           AccessScope:
             Type: cluster
+
+  # The auto-off Lambda reads the Kong metrics through the Kubernetes API.
+  AutoOffAccess:
+    Type: AWS::EKS::AccessEntry
+    Properties:
+      ClusterName: !Ref Cluster
+      PrincipalArn: !ImportValue
+        Fn::Sub: ${AutoOffStackName}-FunctionRoleArn
+      AccessPolicies:
+        - PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSAdminPolicy
+          AccessScope:
+            Type: namespace
+            Namespaces:
+              - fiapgames
 
   ExtraAdminAccess:
     Type: AWS::EKS::AccessEntry
