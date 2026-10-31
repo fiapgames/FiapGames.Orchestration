@@ -26,6 +26,9 @@ IDLE = int(os.environ["IDLE_MINUTES"]) * 60
 STATE = f"/{P}/auto-off/state"
 TOUCH = f"/{P}/auto-off/last-activity"
 REQUESTS = f"/{P}/auto-off/kong-requests"
+# Um "ligar" leva ~50 min com esperas longas sem tocar no contador; enquanto ele
+# roda, nada é apagado. Se ele morrer no meio, o ambiente volta a ser vigiado depois disso.
+STARTING_GRACE = 2 * 3600
 # Cada stack só sai depois das que importam valores dela.
 DEPS = {
     f"{P}-github": [],
@@ -126,7 +129,10 @@ def handler(event, _context):
     if any(st.endswith("IN_PROGRESS") for st in alive.values()):
         return log(f"operação em andamento: {alive}")
 
-    if get(STATE) != "tearing-down":
+    state = get(STATE)
+    if state == "starting" and time.time() - float(get(TOUCH) or 0) < STARTING_GRACE:
+        return log("ligando: espera o fim do up")
+    if state != "tearing-down":
         reason = usage()
         if reason:
             return log(f"em uso: {reason}")

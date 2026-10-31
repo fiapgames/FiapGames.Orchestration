@@ -99,9 +99,6 @@ deploy_stack() {
     ${params:+--parameter-overrides $params} --tags project=fiapgames
   if [ "$stack" = "${PREFIX}-auto-off" ]; then
     upload_auto_off
-    # Ligar agora vence qualquer desligamento que estivesse em curso.
-    ssm put-parameter --name "/${PREFIX}/auto-off/state" --value on --type String --overwrite >/dev/null
-    touch_activity
   fi
 }
 
@@ -211,7 +208,14 @@ cmd_bootstrap() {
   touch_activity
 }
 
+set_auto_off_state() {
+  ssm put-parameter --name "/${PREFIX}/auto-off/state" --value "$1" --type String --overwrite >/dev/null
+  touch_activity
+}
+
 cmd_up() {
+  # "starting" segura o desligamento automático até o fim e vence um desligamento em curso.
+  set_auto_off_state starting
   # O domínio do OpenSearch dentro da VPC exige esta role; ela só pode existir uma vez por conta.
   aws iam create-service-linked-role --aws-service-name opensearchservice.amazonaws.com >/dev/null 2>&1 || true
   while IFS='|' read -r stack template params; do
@@ -219,6 +223,7 @@ cmd_up() {
   done < <(permanent_stacks; env_stacks)
 
   cmd_bootstrap
+  set_auto_off_state on
 
   local lb
   lb="$(kube get svc kong-proxy -n "$NAMESPACE" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
