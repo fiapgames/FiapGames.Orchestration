@@ -7,7 +7,7 @@
 #   SKIP_BUILD=1 ./aws-local/up.sh   # reaplica sem rebuildar as imagens
 #   KIND_CONFIG=outro.yaml ./aws-local/up.sh   # se a porta 8000 do host estiver ocupada
 set -euo pipefail
-shopt -s inherit_errexit
+shopt -s inherit_errexit 2>/dev/null || true  # bash < 4.4 (macOS) não tem
 
 # No Git Bash, caminhos de dentro do container (/etc/...) não podem virar C:/Program Files/Git/...
 in_container() { MSYS_NO_PATHCONV=1 "$@"; }

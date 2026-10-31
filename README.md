@@ -2,7 +2,7 @@
 
 Repositório de orquestração do FiapGames (Tech Challenge Fases 2 e 3). Não contém código de aplicação — apenas o `docker-compose.yml` que sobe todos os microsserviços juntos, compartilhando um único RabbitMQ, a configuração do **API Gateway (Kong)** e instruções de deploy no Kubernetes.
 
-> **O Notifications não faz mais parte desta stack.** Ele foi migrado para **Azure Functions serverless** e roda na nuvem, em `https://fiap-games-notification-hdaza0g6fudjc3ak.westus3-01.azurewebsites.net`. Users e Payments passaram a notificá-lo por HTTP, e não mais via RabbitMQ.
+> **O Notifications não faz mais parte desta stack.** Ele foi migrado para uma **AWS Lambda** (Function URL com `AWS_IAM`) e roda na nuvem; a URL aparece no summary do workflow *Deploy Lambda* do repositório dele. Users e Payments passaram a notificá-lo por HTTP assinado (SigV4), e não mais via RabbitMQ.
 
 Assume que os repositórios dos microsserviços estão clonados **lado a lado** com este:
 
@@ -11,7 +11,7 @@ projeto pos parte 2/
 ├── Fiap.Games.Users/           <- UsersAPI (pasta do projeto: User.Games.Fiap/)
 ├── FiapGames.Catalog/
 ├── FiapGames.Contracts/
-├── FiapGames.Notifications/    <- agora serverless (Azure Functions), não sobe local
+├── FiapGames.Notifications/    <- agora serverless (AWS Lambda), não sobe local
 ├── FiapGames.Orchestration/    <- este repositório
 ├── FiapGames.Payments/
 └── FiapGames.Web/              <- front-end (React + Vite)
@@ -291,7 +291,7 @@ O Catalog recebe o `userId` pelo body ou pela rota, nunca do token, e não lê n
 
 ## Arquitetura de notificações
 
-O Notifications virou **Azure Function serverless** — mas só a parte de e-mail migrou. O RabbitMQ continua sendo o transporte de tudo que é negócio. As duas coisas convivem de propósito, não por inconsistência:
+O Notifications virou **AWS Lambda serverless** — mas só a parte de e-mail migrou. O RabbitMQ continua sendo o transporte de tudo que é negócio. As duas coisas convivem de propósito, não por inconsistência:
 
 | Fluxo | Transporte | Quem dispara |
 |---|---|---|
@@ -302,9 +302,9 @@ O Notifications virou **Azure Function serverless** — mas só a parte de e-mai
 
 O ponto que não é óbvio: **o `PaymentProcessedEvent` continua sendo publicado no RabbitMQ pelo Payments**, mesmo depois da migração — porque, além de alimentar a notificação (que saiu), ele é o que o `PaymentProcessedConsumer` do Catalog usa para aprovar o pedido e inserir o jogo em `UserGameLibraries`. Removê-lo deixaria toda compra eternamente `Pending`. A diferença em relação ao `UserCreatedEvent` do Users é que aquele só servia para notificar — não tinha outro consumidor — e por isso saiu do RabbitMQ sem quebrar nada.
 
-Os dois `NotificationsClient` (Users e Payments) seguem o mesmo desenho: `HttpClient` nomeado com `AddHttpClient<INotificationsClient, NotificationsClient>`, header `x-functions-key` com a chave (`Notifications__FunctionKey`), e um try/catch que rebaixa falha de notificação a `LogWarning` — porque notificação é acessória, não pode derrubar cadastro nem processamento de pagamento.
+Os dois `NotificationsClient` (Users e Payments) seguem o mesmo desenho: `HttpClient` nomeado com `AddHttpClient<INotificationsClient, NotificationsClient>` + `SigV4Handler`, que assina cada chamada com SigV4 (serviço `lambda`, região `Notifications__Region`) usando a cadeia padrão de credenciais da AWS, e um try/catch que rebaixa falha de notificação a `LogWarning` — porque notificação é acessória, não pode derrubar cadastro nem processamento de pagamento. Não há mais chave: no EKS as credenciais vêm do **EKS Pod Identity** (ver `infra/cloudformation/03-eks.yaml`).
 
-**Consequência de a Function não estar em código no disco:** ela existe só deployada no Azure (`fiap-games-notification`, resource group `fiap-games`, região `westus3`). O contrato (`/api/notifications/user-created`, `/api/notifications/payment-processed`, ambos retornando `202 Accepted`) foi descoberto testando diretamente com a chave, não lendo código-fonte.
+**Consequência:** a Lambda mora no repositório `FiapGames.Notifications` (deploy pelo workflow *Deploy Lambda*, função `fiap-games-notification`, região `us-east-2`). O contrato (`/api/notifications/user-created`, `/api/notifications/payment-processed`, ambos retornando `202 Accepted`) está documentado no README dela.
 
 ## Persistência poliglota e cache (MongoDB + Redis)
 
@@ -342,7 +342,7 @@ O ganho real está na biblioteca: sem cache, cada chamada faz um **RPC síncrono
 
 ## Observabilidade (New Relic)
 
-Stack escolhida para o item 3 do Tech Challenge: **Opção B — plataforma de APM gerenciada, New Relic**. Cobre os três pilares exigidos, no gateway **e** nos três microsserviços que ainda rodam localmente (Catalog, Payments, Users — o Notifications virou Azure Function serverless e está fora deste escopo, ver "Arquitetura de notificações" acima).
+Stack escolhida para o item 3 do Tech Challenge: **Opção B — plataforma de APM gerenciada, New Relic**. Cobre os três pilares exigidos, no gateway **e** nos três microsserviços que ainda rodam localmente (Catalog, Payments, Users — o Notifications virou AWS Lambda serverless e está fora deste escopo, ver "Arquitetura de notificações" acima).
 
 > **Estado atual: desligado.** Tudo está versionado e inerte, esperando uma license key. Sem ela nada quebra e o ambiente sobe exatamente como antes. Guia completo de ativação: [`kong/NEWRELIC.md`](kong/NEWRELIC.md).
 
@@ -375,7 +375,7 @@ Agent dotnetfiapgames-catalog-api connected to collector.newrelic.com:443
 Agent fully connected.
 ```
 
-Confirmado nos 3 serviços. No fluxo de compra completo (cadastro → login → criar jogo → comprar → Payments processa → notifica a Function por HTTP), todos os três reportaram `Transaction`/`Span` — incluindo o **Payments, que nunca recebe uma requisição HTTP de entrada**: ele gera transação só por **consumir mensagem do RabbitMQ**, capturada pelo wrapper MassTransit do agente. Ou seja, o trace atravessa a fila e liga Catalog → Payments num único trace distribuído — o miolo do fluxo de "Compra de Jogo" que o enunciado pede. A notificação por e-mail saiu do RabbitMQ nesta migração e virou uma chamada HTTP direta à Azure Function (ver "Arquitetura de notificações" acima), então não aparece como `Transaction` de nenhum serviço local.
+Confirmado nos 3 serviços. No fluxo de compra completo (cadastro → login → criar jogo → comprar → Payments processa → notifica a Function por HTTP), todos os três reportaram `Transaction`/`Span` — incluindo o **Payments, que nunca recebe uma requisição HTTP de entrada**: ele gera transação só por **consumir mensagem do RabbitMQ**, capturada pelo wrapper MassTransit do agente. Ou seja, o trace atravessa a fila e liga Catalog → Payments num único trace distribuído — o miolo do fluxo de "Compra de Jogo" que o enunciado pede. A notificação por e-mail saiu do RabbitMQ nesta migração e virou uma chamada HTTP direta à Lambda (ver "Arquitetura de notificações" acima), então não aparece como `Transaction` de nenhum serviço local.
 
 Do lado do gateway, os endpoints da New Relic responderam `202` (Log API) e `200` (OTLP) para requisições de teste feitas da mesma rede Docker que o Kong usa, e o Admin API confirmou a chave de 40 caracteres carregada nos dois plugins — sem erro nenhum no log do Kong depois do reload.
 
@@ -408,20 +408,25 @@ O Notifications não aparece na tabela porque é serverless — não há contain
 
 ## Executando localmente
 
-Antes de subir, gere o `.env` com as senhas (aleatórias, nunca versionadas) e acrescente a chave da Azure Function de notificações:
+Antes de subir, gere o `.env` com as senhas (aleatórias, nunca versionadas) e acrescente a URL da Lambda de notificações e credenciais AWS para assinar as chamadas:
 
 ```bash
 ci/secrets.sh dotenv .env
-echo 'NOTIFICATIONS_FUNCTION_KEY=<chave da function>' >> .env
+cat >> .env <<'EOT'
+NOTIFICATIONS_BASE_URL=<Function URL da Lambda>
+AWS_ACCESS_KEY_ID=<chave de um usuário com lambda:InvokeFunctionUrl>
+AWS_SECRET_ACCESS_KEY=<segredo>
+AWS_REGION=us-east-2
+EOT
 ```
 
-A chave sai de:
+A URL sai de:
 
 ```bash
-az functionapp keys list -g fiap-games -n fiap-games-notification --query "functionKeys.default" -o tsv
+aws lambda get-function-url-config --function-name fiap-games-notification --region us-east-2 --query FunctionUrl --output text
 ```
 
-O `.env` não deve ser versionado. Sem ele, Users e Payments sobem normalmente, mas as chamadas de notificação recebem `401`.
+O `.env` não deve ser versionado. Sem ele, Users e Payments sobem normalmente, mas as chamadas de notificação falham (`403`) e viram apenas `LogWarning`.
 
 ```bash
 docker compose up -d --build
@@ -438,7 +443,7 @@ Endpoints úteis — todos pelo gateway (`:8080`/`:8081`/`:8083` estão comentad
 - RabbitMQ management: `http://localhost:15672` (usuário `fiapgames-admin`, senha `RABBITMQ_PASSWORD` do `.env`)
 - Kong Manager (GUI oficial, sem login): `http://localhost:8002`
 - Konga (GUI da comunidade): `http://localhost:1337` — **login já vem criado sozinho**, usuário `admin`, senha `KONGA_ADMIN_PASSWORD` do `.env` (ver [Duas UIs de administração](#duas-uis-de-administração))
-- Notifications (Azure): `https://fiap-games-notification-hdaza0g6fudjc3ak.westus3-01.azurewebsites.net/api/health`
+- Notifications (AWS Lambda): `<Function URL>/api/health` (exige requisição assinada com SigV4)
 - MongoDB: `localhost:27017` (usuário `fiapgames-admin`, senha `MONGO_PASSWORD` do `.env`) — `docker compose exec mongodb sh -c 'mongosh -u fiapgames-admin -p "$MONGO_INITDB_ROOT_PASSWORD"'`
 - Redis: `localhost:6380` (porta do container é 6379; remapeada porque a 6379 costuma já estar em uso por outro projeto na máquina) — `docker compose exec redis redis-cli`
 
@@ -475,7 +480,7 @@ curl -i http://localhost:8000/games
 curl -X POST http://localhost:8000/api/users -H "Content-Type: application/json" \
   -d '{"nome":"Maria Silva","email":"maria@example.com","password":"SenhaForte@123"}'
 
-# a notificação de boas-vindas aparece no Application Insights (ver "Conferindo as notificações")
+# a notificação de boas-vindas aparece no CloudWatch Logs (ver "Conferindo as notificações")
 
 # 2. faz login (rota pública) e guarda o access token
 TOKEN=$(curl -s -X POST http://localhost:8000/api/users/login -H "Content-Type: application/json" \
@@ -523,17 +528,16 @@ curl -s http://localhost:8100/metrics | head -40
 
 ### Conferindo as notificações
 
-Como o Notifications virou serverless, as notificações não vão mais para o Mailhog — elas são registradas no Application Insights do Azure.
+Como o Notifications virou serverless, as notificações não vão mais para o Mailhog — elas são registradas no CloudWatch Logs da Lambda.
 
 ```bash
-az monitor app-insights query --app fiap-games-notification -g fiap-games \
-  --analytics-query "traces | where timestamp > ago(30m) | where message contains 'NOTIFICA' | project timestamp, message | order by timestamp desc"
+aws logs tail /aws/lambda/fiap-games-notification --region us-east-2 --since 30m --filter-pattern NOTIFICA
 ```
 
-Há um atraso de 1 a 3 minutos na ingestão. Para acompanhar em tempo real:
+Para acompanhar em tempo real:
 
 ```bash
-az webapp log tail -g fiap-games -n fiap-games-notification
+aws logs tail /aws/lambda/fiap-games-notification --region us-east-2 --follow
 ```
 
 Encerrar tudo:
@@ -584,7 +588,7 @@ Nenhuma senha, connection string ou chave fica no código, nos YAMLs ou nos `app
 |---|---|
 | docker compose | `.env` deste diretório (não versionado). `ci/secrets.sh dotenv .env` preenche o que faltar com valores aleatórios |
 | Kind (`aws-local/up.sh`) | o mesmo `.env`, completado na primeira execução |
-| EKS (`infra/aws.sh up` ou o botão *ligar*) | GitHub Secrets do repositório (`NOTIFICATIONS_FUNCTION_KEY`, `NEW_RELIC_LICENSE_KEY`, `KONGA_ADMIN_PASSWORD`). As senhas internas (bancos, RabbitMQ, JWT) são geradas a cada *ligar* e existem só dentro do cluster |
+| EKS (`infra/aws.sh up` ou o botão *ligar*) | GitHub Secrets do repositório (`NEW_RELIC_LICENSE_KEY`, `KONGA_ADMIN_PASSWORD`). As senhas internas (bancos, RabbitMQ, JWT) são geradas a cada *ligar* e existem só dentro do cluster |
 
 Se o Secret já existe no cluster, os valores dele são mantidos: rodar o bootstrap de novo não troca a senha de um banco que já foi inicializado com a anterior.
 
@@ -668,7 +672,6 @@ O log de cada execução fica no CloudWatch, em `/aws/lambda/fiapgames-auto-off`
 | `EKS_ADMIN_ARN` | variável | ARN do seu usuário IAM, para manter seu acesso ao cluster quando o GitHub religar |
 | `AUTO_OFF_IDLE_MINUTES` | variável | opcional, padrão `10`; aplicado a cada *ligar* |
 | `BUDGET_EMAIL` | secret | opcional, e-mail do alerta de custo. Secret porque variável aparece no log público |
-| `NOTIFICATIONS_FUNCTION_KEY` | secret | chave da Azure Function de notificações |
 | `NEW_RELIC_LICENSE_KEY` | secret | opcional, liga a observabilidade |
 | `KONGA_ADMIN_PASSWORD` | secret | opcional, senha de login da Konga; sem ele é gerada |
 
@@ -729,7 +732,7 @@ docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -no-color   # n
 
 > **Sobre o API Gateway:** o Kong entrou nesta fase e **exige recriar o cluster** — o `kind-config.yaml` publica as portas do gateway no host via `extraPortMappings`, e isso só pode ser definido na criação do cluster. Se você já tem o cluster `fiapgames` de antes, rode `kind delete cluster --name fiapgames` e comece do passo 1. Como toda a infra usa `emptyDir`, não há dado a preservar.
 
-> **Status atual: Catalog, Payments e Users foram testados no cluster Kind; o Notifications não é mais implantado lá** — virou Azure Functions serverless, fora do cluster. O `Fiap.Games.Users` originalmente trazia sua própria pasta `k8s/` isolada (namespace `games-fiap`, RabbitMQ e SQL Server próprios) — foi reconciliada para usar o namespace e a infraestrutura compartilhados (`fiapgames`), do mesmo jeito que os outros dois. Os manifestos de infra e RabbitMQ próprios do Users foram removidos (`00-namespace.yaml`, `rabbitmq.yaml`, `sqlserver.yaml`, `kustomization.yaml`); um novo `sqlserver-users.yaml` (SQL Server dedicado do Users, já que cada serviço tem seu próprio banco) foi adicionado aqui, em `k8s/`.
+> **Status atual: Catalog, Payments e Users foram testados no cluster Kind; o Notifications não é mais implantado lá** — virou AWS Lambda serverless, fora do cluster. O `Fiap.Games.Users` originalmente trazia sua própria pasta `k8s/` isolada (namespace `games-fiap`, RabbitMQ e SQL Server próprios) — foi reconciliada para usar o namespace e a infraestrutura compartilhados (`fiapgames`), do mesmo jeito que os outros dois. Os manifestos de infra e RabbitMQ próprios do Users foram removidos (`00-namespace.yaml`, `rabbitmq.yaml`, `sqlserver.yaml`, `kustomization.yaml`); um novo `sqlserver-users.yaml` (SQL Server dedicado do Users, já que cada serviço tem seu próprio banco) foi adicionado aqui, em `k8s/`.
 
 Cada microsserviço mantém seus próprios manifestos (`Deployment`, `ConfigMap`, e no caso do Catalog e do Users também `Service`) em `k8s/` no respectivo repositório. Esses manifestos assumem que a infraestrutura compartilhada (RabbitMQ, Postgres, SQL Server) já existe no cluster com hostnames fixos:
 
@@ -738,7 +741,7 @@ Cada microsserviço mantém seus próprios manifestos (`Deployment`, `ConfigMap`
 - `sqlserver.fiapgames.svc.cluster.local` (Catalog)
 - `sqlserver-users.fiapgames.svc.cluster.local` (Users — banco próprio, separado do SQL Server do Catalog)
 
-Os pods de Users e Payments precisam alcançar a Azure Function pela internet. A URL vem do ConfigMap de cada serviço (`Notifications__BaseUrl`) e a chave, do Secret (`Notifications__FunctionKey`).
+Os pods de Users e Payments precisam alcançar a Lambda pela internet. A URL vem do ConfigMap de cada serviço (`Notifications__BaseUrl`) e não há segredo: as credenciais para assinar (SigV4) vêm do EKS Pod Identity, ligado às ServiceAccounts `user-api` e `payments-api` pelo `03-eks.yaml`.
 
 Nenhum repositório de microsserviço traz manifesto de Deployment/Service para essa infraestrutura — por isso os manifestos de infra (`rabbitmq.yaml`, `postgres.yaml`, `sqlserver.yaml`, `sqlserver-users.yaml`) vivem aqui, em `k8s/`. O Users também tem um `migration-job.yaml` (`Job` do Kubernetes que roda `dotnet ... --migrate` uma vez antes do Deployment subir) — os outros três serviços aplicam as migrations automaticamente no startup do próprio processo, o Users prefere um Job separado (evita corrida entre múltiplas réplicas migrando ao mesmo tempo).
 
@@ -840,7 +843,7 @@ Start-Process kubectl -ArgumentList 'port-forward -n fiapgames svc/user-api 8091
 Start-Process kubectl -ArgumentList 'port-forward -n fiapgames svc/payments-api 8092:80' -WindowStyle Hidden
 ```
 
-> Não há `svc/mailhog` para encaminhar — o Notifications (e o Mailhog que ele usava) não roda mais no cluster. As notificações de verdade agora vão para a Azure Function; conferir em Application Insights, não no Mailhog.
+> Não há `svc/mailhog` para encaminhar — o Notifications (e o Mailhog que ele usava) não roda mais no cluster. As notificações de verdade agora vão para a Lambda; conferir em CloudWatch Logs, não no Mailhog.
 
 > O passo 7 (`imagePullPolicy: IfNotPresent`) só é necessário para teste local com Kind, porque as imagens não foram publicadas de verdade no Docker Hub ainda. Depois que as imagens forem publicadas (`docker push`) e os manifestos apontarem para um registry real, isso deixa de ser necessário — o comportamento padrão (`imagePullPolicy: Always` para tag `latest`) volta a ser o correto.
 
@@ -934,7 +937,7 @@ curl http://localhost:8000/payments/health
 
 Validado de ponta a ponta dentro de um cluster Kind real, **antes da migração do Notifications para serverless**: o cadastro publicou `UserCreatedEvent` e o e-mail de boas-vindas chegou no Notifications; a compra foi `Approved` pelo Payments e a confirmação também chegou por e-mail; e `GET /library/{userId}` retornou nome/e-mail reais do usuário (via `UserLookupRequested`/`Responded` no RabbitMQ) junto com o jogo comprado.
 
-> Após a migração, o trecho de notificação desse fluxo passou a ser uma chamada HTTP à Azure Function, conferível no Application Insights. **Esse novo caminho — e o novo `payments-api-service.yaml` — ainda não foram revalidados dentro do cluster Kind.** Só o `docker compose` foi ajustado e verificado ponta a ponta.
+> Após a migração, o trecho de notificação desse fluxo passou a ser uma chamada HTTP à Lambda, conferível no CloudWatch Logs. **Esse novo caminho — e o novo `payments-api-service.yaml` — ainda não foram revalidados dentro do cluster Kind.** Só o `docker compose` foi ajustado e verificado ponta a ponta.
 
 ### Front-end contra o gateway
 

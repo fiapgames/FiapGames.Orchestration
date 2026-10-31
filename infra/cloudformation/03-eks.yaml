@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: FiapGames - EKS cluster and managed node group.
+Description: FiapGames - EKS cluster, managed node group and Pod Identity for the Lambda caller pods.
 
 Parameters:
   NetworkStackName:
@@ -35,6 +35,13 @@ Parameters:
     Type: String
     Default: ""
     Description: IAM user or role of a person who also administers the cluster (kubectl, Headlamp). Empty for none.
+  Namespace:
+    Type: String
+    Default: fiapgames
+  NotificationsFunctionName:
+    Type: String
+    Default: fiap-games-notification
+    Description: Lambda (Function URL with AWS_IAM) that user-api and payments-api call, signing the request with SigV4.
 
 Conditions:
   HasExtraAdmin: !Not [!Equals [!Ref ExtraAdminArn, ""]]
@@ -154,6 +161,59 @@ Resources:
         - PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
           AccessScope:
             Type: cluster
+
+  # EKS Pod Identity: the agent runs as a DaemonSet on the nodes and hands each
+  # associated pod temporary credentials for its own role, so the permission to
+  # call the Lambda reaches only user-api and payments-api, not the whole node.
+  PodIdentityAgent:
+    Type: AWS::EKS::Addon
+    DependsOn: NodeGroup
+    Properties:
+      ClusterName: !Ref Cluster
+      AddonName: eks-pod-identity-agent
+      ResolveConflicts: OVERWRITE
+
+  NotificationsInvokerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ClusterName}-notifications-invoker
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      Policies:
+        - PolicyName: invoke-notifications-lambda
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunctionUrl
+                  - lambda:InvokeFunction
+                Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${NotificationsFunctionName}
+
+  UserApiPodIdentity:
+    Type: AWS::EKS::PodIdentityAssociation
+    DependsOn: PodIdentityAgent
+    Properties:
+      ClusterName: !Ref Cluster
+      Namespace: !Ref Namespace
+      ServiceAccount: user-api
+      RoleArn: !GetAtt NotificationsInvokerRole.Arn
+
+  PaymentsApiPodIdentity:
+    Type: AWS::EKS::PodIdentityAssociation
+    DependsOn: PodIdentityAgent
+    Properties:
+      ClusterName: !Ref Cluster
+      Namespace: !Ref Namespace
+      ServiceAccount: payments-api
+      RoleArn: !GetAtt NotificationsInvokerRole.Arn
 
 Outputs:
   ClusterName:

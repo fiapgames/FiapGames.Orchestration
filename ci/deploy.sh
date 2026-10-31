@@ -8,7 +8,7 @@
 #
 # KUBE_CONTEXT escolhe o cluster; sem ele, usa o contexto atual.
 set -euo pipefail
-shopt -s inherit_errexit
+shopt -s inherit_errexit 2>/dev/null || true  # bash < 4.4 (macOS) não tem
 
 [ $# -eq 3 ] || { sed -n '2,8p' "$0"; exit 1; }
 MANIFESTS="$1"

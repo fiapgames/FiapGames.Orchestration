@@ -13,7 +13,7 @@
 # IDLE_MINUTES=10                minutos sem uso até o desligamento automático (stack auto-off)
 # EKS_ADMIN_ARN=arn:...          pessoa com acesso de admin ao cluster (padrão: o usuário IAM atual)
 set -euo pipefail
-shopt -s inherit_errexit
+shopt -s inherit_errexit 2>/dev/null || true  # bash < 4.4 (macOS) não tem
 
 PREFIX=fiapgames
 CLUSTER=fiapgames
@@ -187,7 +187,7 @@ cmd_bootstrap() {
   # No GitHub vêm dos Secrets do repositório; o que faltar é gerado e fica só no cluster.
   # Localmente, só as chaves externas saem do .env: as senhas da AWS nunca são as do Kind.
   local var
-  for var in NOTIFICATIONS_FUNCTION_KEY NEW_RELIC_LICENSE_KEY; do
+  for var in NEW_RELIC_LICENSE_KEY; do
     [ -n "${!var:-}" ] || export "$var=$(grep -s "^${var}=" .env | tr -d '\r' | cut -d= -f2- || true)"
   done
   KUBE_CONTEXT="$CONTEXT" ci/secrets.sh apply

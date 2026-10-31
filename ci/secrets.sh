@@ -6,7 +6,7 @@
 #   ci/secrets.sh apply            # Secrets no namespace (KUBE_CONTEXT escolhe o cluster)
 #   ci/secrets.sh dotenv .env      # completa o .env com senhas aleatórias (compose e Kind)
 set -euo pipefail
-shopt -s inherit_errexit
+shopt -s inherit_errexit 2>/dev/null || true  # bash < 4.4 (macOS) não tem
 
 NAMESPACE="${NAMESPACE:-fiapgames}"
 STORE=infra-credentials
@@ -58,7 +58,6 @@ cmd_apply() {
   secret_from_literals "$STORE" "${literals[@]}"
 
   local rabbit_user=fiapgames-admin
-  local function_key="${NOTIFICATIONS_FUNCTION_KEY:-}"
   secret_from_literals catalog-api-secrets \
     "ConnectionStrings__SqlServer=Server=sqlserver.${NAMESPACE}.svc.cluster.local,1433;Database=fiapgames-catalog;User Id=sa;Password=${SQLSERVER_CATALOG_PASSWORD};TrustServerCertificate=True" \
     "ConnectionStrings__Mongo=mongodb://fiapgames-admin:${MONGO_PASSWORD}@mongodb.${NAMESPACE}.svc.cluster.local:27017" \
@@ -67,11 +66,10 @@ cmd_apply() {
   secret_from_literals user-api-secret \
     "ConnectionStrings__SqlServer=Server=sqlserver-users,1433;Database=UserGamesFiap;User Id=sa;Password=${SQLSERVER_USERS_PASSWORD};TrustServerCertificate=True;Encrypt=False" \
     "RabbitMq__UserName=${rabbit_user}" "RabbitMq__Password=${RABBITMQ_PASSWORD}" \
-    "Jwt__SecretKey=${JWT_SECRET_KEY}" "Notifications__FunctionKey=${function_key}"
+    "Jwt__SecretKey=${JWT_SECRET_KEY}"
   secret_from_literals payments-api-secrets \
     "ConnectionStrings__Postgres=Host=postgres.${NAMESPACE}.svc.cluster.local;Port=5432;Database=fiapgames-payments;Username=fiapgames-admin;Password=${POSTGRES_PASSWORD}" \
-    "RabbitMq__UserName=${rabbit_user}" "RabbitMq__Password=${RABBITMQ_PASSWORD}" \
-    "Notifications__FunctionKey=${function_key}"
+    "RabbitMq__UserName=${rabbit_user}" "RabbitMq__Password=${RABBITMQ_PASSWORD}"
 
   # Opcional: sem ele o Kong e os agentes seguem com a observabilidade desligada.
   if [ -n "${NEW_RELIC_LICENSE_KEY:-}" ]; then

@@ -5,7 +5,7 @@
 #   ci/simulate-pipeline.sh catalog-api
 #   ci/simulate-pipeline.sh users-api
 set -euo pipefail
-shopt -s inherit_errexit
+shopt -s inherit_errexit 2>/dev/null || true  # bash < 4.4 (macOS) não tem
 
 REGISTRY=localhost:5001
 TRIVY_IMAGE=aquasec/trivy:0.75.0
