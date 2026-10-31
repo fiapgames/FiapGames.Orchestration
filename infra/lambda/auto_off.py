@@ -26,6 +26,7 @@ IDLE = int(os.environ["IDLE_MINUTES"]) * 60
 STATE = f"/{P}/auto-off/state"
 TOUCH = f"/{P}/auto-off/last-activity"
 REQUESTS = f"/{P}/auto-off/kong-requests"
+PAUSED = f"/{P}/auto-off/paused"
 # Um "ligar" leva ~50 min com esperas longas sem tocar no contador; enquanto ele
 # roda, nada é apagado. Se ele morrer no meio, o ambiente volta a ser vigiado depois disso.
 STARTING_GRACE = 2 * 3600
@@ -121,6 +122,8 @@ def remove_k8s_load_balancers(vpc):
 
 def handler(event, _context):
     dry = bool((event or {}).get("dryRun"))
+    if get(PAUSED) == "true":
+        return log("pausado: infra/aws.sh resume volta a vigiar")
     alive = {s: st for s in DEPS if (st := status(s)) and st != "DELETE_COMPLETE"}
     if not alive:
         if not dry:

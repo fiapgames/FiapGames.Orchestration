@@ -9,7 +9,7 @@ on:
       acao:
         description: O que fazer
         type: choice
-        options: [ligar, desligar, manter-ligado]
+        options: [ligar, desligar, manter-ligado, pausar-desligamento, retomar-desligamento]
         default: ligar
 
 permissions:
@@ -74,4 +74,6 @@ jobs:
             ligar) infra/aws.sh up ;;
             desligar) infra/aws.sh down ;;
             manter-ligado) infra/aws.sh keep-alive ;;
+            pausar-desligamento) infra/aws.sh pause ;;
+            retomar-desligamento) infra/aws.sh resume ;;
           esac

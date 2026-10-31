@@ -6,6 +6,8 @@
 #   ./infra/aws.sh up            # liga: stacks + infra compartilhada + apps (~35 min do zero)
 #   ./infra/aws.sh down          # desliga: apaga tudo que cobra por hora
 #   ./infra/aws.sh keep-alive    # conta como uso agora (adia o desligamento automático)
+#   ./infra/aws.sh pause         # suspende o desligamento automático até o resume
+#   ./infra/aws.sh resume        # volta a vigiar, contando o tempo sem uso a partir de agora
 #   ./infra/aws.sh outputs       # endpoints, registry e roles do GitHub
 #   ./infra/aws.sh destroy       # down + apaga também a base permanente (ECR, roles, budget)
 #
@@ -277,6 +279,23 @@ cmd_keep_alive() {
   echo "uso registrado: o desligamento automático recomeça a contar agora"
 }
 
+set_auto_off_paused() {
+  ssm put-parameter --name "/${PREFIX}/auto-off/paused" --value "$1" --type String --overwrite >/dev/null
+}
+
+cmd_pause() {
+  # Garante que a Lambda em uso já conhece a pausa, mesmo sem um "ligar" depois desta versão.
+  upload_auto_off
+  set_auto_off_paused true
+  echo "desligamento automático pausado: o ambiente fica ligado (e cobrando) até o desligar ou o resume"
+}
+
+cmd_resume() {
+  touch_activity
+  set_auto_off_paused false
+  echo "desligamento automático retomado: desliga após ${IDLE_MINUTES:-10} min sem uso"
+}
+
 cmd_outputs() {
   step "Saídas"
   for stack in "${PREFIX}-base" "${PREFIX}-ecr" "${PREFIX}-eks" "${PREFIX}-opensearch" "${PREFIX}-github"; do
@@ -294,6 +313,8 @@ case "${1:-}" in
   down) cmd_down ;;
   destroy) cmd_destroy ;;
   keep-alive) cmd_keep_alive ;;
+  pause) cmd_pause ;;
+  resume) cmd_resume ;;
   outputs) cmd_outputs ;;
-  *) sed -n '2,15p' "$0" | grep -v '^$'; exit 1 ;;
+  *) sed -n '2,17p' "$0" | grep -v '^$'; exit 1 ;;
 esac

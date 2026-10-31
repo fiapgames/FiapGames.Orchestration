@@ -629,6 +629,8 @@ As stacks se dividem em dois grupos. As **permanentes** não cobram por hora e s
 ./infra/aws.sh up            # liga: stacks + infra compartilhada + Kong + as 3 APIs (~35 min do zero)
 ./infra/aws.sh down          # desliga: apaga as stacks do ambiente
 ./infra/aws.sh keep-alive    # zera o contador de ociosidade
+./infra/aws.sh pause         # suspende o desligamento automático
+./infra/aws.sh resume        # volta a vigiar, contando a partir de agora
 ./infra/aws.sh outputs       # registry, roles do GitHub, endpoint do OpenSearch
 ./infra/aws.sh destroy       # down + apaga também as permanentes
 ```
@@ -646,7 +648,7 @@ aws eks associate-access-policy --cluster-name fiapgames --principal-arn <arn-do
 
 ### Ligar, desligar e desligamento automático
 
-O workflow `.github/workflows/deploy-prod.yml` deste repositório tem três botões em *Actions → deploy-prod → Run workflow*: **ligar**, **desligar** e **manter-ligado**.
+O workflow `.github/workflows/deploy-prod.yml` deste repositório tem cinco botões em *Actions → deploy-prod → Run workflow*: **ligar**, **desligar**, **manter-ligado**, **pausar-desligamento** e **retomar-desligamento**.
 
 O **desligamento automático roda dentro da AWS**, não no GitHub: o GitHub atrasa por horas os agendamentos de repositório com pouca atividade. A stack `fiapgames-auto-off` tem uma Lambda (`infra/lambda/auto_off.py`) que o EventBridge Scheduler aciona a cada 5 minutos. Quando ninguém usa o ambiente por `IDLE_MINUTES` (variável `AUTO_OFF_IDLE_MINUTES`, padrão 10), ela apaga as stacks do ambiente, um passo por execução: `github` e `opensearch`, depois `eks`, depois o load balancer do Kong e a `network`. Na prática, desliga entre 10 e 15 minutos depois do último uso e termina de apagar em uns 30 a 40 minutos.
 
@@ -660,6 +662,8 @@ Uma execução que encontra uma stack sendo criada ou apagada espera a próxima.
 ```bash
 aws lambda invoke --function-name fiapgames-auto-off --payload '{"dryRun": true}' --cli-binary-format raw-in-base64-out /dev/stdout
 ```
+
+**Pausar.** O *pausar-desligamento* grava `true` em `/fiapgames/auto-off/paused` e a Lambda passa a não fazer nada, nem terminar um desligamento já começado. A pausa sobrevive a *ligar* e *desligar*, e o ambiente fica cobrando por hora até alguém rodar *desligar* ou *retomar-desligamento*, que volta a vigiar contando o tempo sem uso a partir daquele momento. O alerta do budget continua valendo.
 
 O log de cada execução fica no CloudWatch, em `/aws/lambda/fiapgames-auto-off`.
 
