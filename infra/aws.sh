@@ -197,6 +197,9 @@ cmd_bootstrap() {
     --from-file=kong.yml.template=kong/kong.k8s.yml --dry-run=client -o yaml | kube apply -f -
   kube apply -f k8s/kong/
   kube wait --for=condition=complete job/kong-bootstrap -n "$NAMESPACE" --timeout=600s
+  # O db_import não invalida o cache: um Kong que subiu antes do seed segue sem rotas (404).
+  kube rollout restart deployment/kong -n "$NAMESPACE"
+  kube rollout status deployment/kong -n "$NAMESPACE" --timeout=300s
 
   step "Microsserviços (última imagem do ECR)"
   local registry
