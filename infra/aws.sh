@@ -239,22 +239,28 @@ cmd_up() {
 
 # Load balancers criados pelo Kubernetes não pertencem a nenhuma stack e travam a remoção da VPC.
 delete_k8s_load_balancers() {
-  aws eks describe-cluster --name "$CLUSTER" >/dev/null 2>&1 || return 0
-  aws eks update-kubeconfig --name "$CLUSTER" --alias "$CONTEXT" >/dev/null
-  local services
-  services="$(kube get svc -A \
-    -o jsonpath='{range .items[?(@.spec.type=="LoadBalancer")]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}')"
-  [ -z "$services" ] && return 0
-  for svc in $services; do
-    kube delete svc -n "${svc%%/*}" "${svc#*/}" --wait=true
-  done
-  local vpc
+  if aws eks describe-cluster --name "$CLUSTER" >/dev/null 2>&1; then
+    aws eks update-kubeconfig --name "$CLUSTER" --alias "$CONTEXT" >/dev/null
+    local svc
+    for svc in $(kube get svc -A       -o jsonpath='{range .items[?(@.spec.type=="LoadBalancer")]}{.metadata.namespace}/{.metadata.name}{"
+"}{end}'); do
+      kube delete svc -n "${svc%%/*}" "${svc#*/}" --wait=true
+    done
+  fi
+  stack_exists "${PREFIX}-network" || return 0
+  local vpc lb group
   vpc="$(stack_output "${PREFIX}-network" VpcId)"
+  # Se o cluster sumiu antes do Service, o load balancer fica órfão e trava a VPC.
+  for lb in $(aws elb describe-load-balancers     --query "LoadBalancerDescriptions[?VPCId=='${vpc}'].LoadBalancerName" --output text); do
+    aws elb delete-load-balancer --load-balancer-name "$lb"
+  done
   for _ in $(seq 1 30); do
-    local classic network
-    classic="$(aws elb describe-load-balancers --query "length(LoadBalancerDescriptions[?VPCId=='${vpc}'])" --output text)"
-    network="$(aws elbv2 describe-load-balancers --query "length(LoadBalancers[?VpcId=='${vpc}'])" --output text)"
-    [ $((classic + network)) -eq 0 ] && return 0
+    local left=0
+    for group in $(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=${vpc}" "Name=group-name,Values=k8s-elb-*"       --query 'SecurityGroups[].GroupId' --output text); do
+      # Só sai depois que a interface do load balancer é liberada.
+      aws ec2 delete-security-group --group-id "$group" >/dev/null 2>&1 || left=1
+    done
+    [ "$left" -eq 0 ] && return 0
     sleep 10
   done
   echo "load balancers ainda presentes na VPC ${vpc}; a remoção da rede pode falhar" >&2
