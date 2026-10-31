@@ -655,7 +655,7 @@ Conta como uso:
 - imagem nova no ECR, ou seja, deploy da pipeline;
 - qualquer operação do `infra/aws.sh` (`up`, bootstrap, `keep-alive`), que grava o horário em `/fiapgames/auto-off/last-activity` no SSM Parameter Store.
 
-Uma execução que encontra uma stack sendo criada ou apagada espera a próxima. Para testar sem apagar nada:
+Uma execução que encontra uma stack sendo criada ou apagada espera a próxima. Enquanto um *ligar* roda, o parâmetro `/fiapgames/auto-off/state` fica em `starting` e nada é apagado: entre uma stack e outra há minutos sem nenhuma em andamento, e o contador de uso ficaria velho. Se o *ligar* morrer no meio, a vigilância volta 2 horas depois do último toque. Para testar sem apagar nada:
 
 ```bash
 aws lambda invoke --function-name fiapgames-auto-off --payload '{"dryRun": true}' --cli-binary-format raw-in-base64-out /dev/stdout
