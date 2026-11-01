@@ -173,6 +173,24 @@ docker compose restart kong
 
 > **O passo 4 não é opcional.** O `db_import` grava direto no Postgres, mas **não emite os eventos de invalidação de cache** que o Kong usa para saber que a config mudou — um nó já rodando continua servindo o router antigo indefinidamente. Isso foi observado na prática: depois de adicionar uma rota nova, o Admin API (`/routes`) já mostrava a rota corretamente no banco enquanto o proxy ainda respondia `404 no Route matched`. O `restart` (ou `kong reload`) resolve. No Kubernetes o equivalente é `kubectl rollout restart deployment/kong -n fiapgames`.
 
+No Kubernetes, atualizar a Secret e reaplicar um Job já concluído também não executa o import novamente. O bootstrap compartilhado resolve as duas etapas:
+
+```bash
+KUBE_CONTEXT=aws-fiapgames bash ci/bootstrap-kong.sh
+# No Kind: KUBE_CONTEXT=kind-fiapgames bash ci/bootstrap-kong.sh
+```
+
+O script atualiza a Secret, recria somente o Job `kong-bootstrap`, espera o import terminar e reinicia o Deployment do Kong para renovar o cache. O Postgres e os dados das aplicações são preservados. `infra/aws.sh` e `aws-local/up.sh` usam esse mesmo script, de modo que executar `ligar` em um ambiente existente também aplica rotas novas como `/search`.
+
+Teste de regressão com Kubernetes, Kong e Postgres reais, em namespace temporário e isolado:
+
+```bash
+node tests/kong-bootstrap.integration.mjs
+# Usa docker-desktop por padrão; para Kind, defina KUBE_CONTEXT=kind-fiapgames.
+```
+
+O teste reproduz o Job concluído que mantém a configuração antiga, verifica a ativação de `/search` após o novo bootstrap (401 sem JWT) e repete a execução para verificar idempotência. Ele aceita apenas contextos locais Docker Desktop/Kind e remove seu namespace ao terminar. Requer Node.js, kubectl e Bash.
+
 **Zerando só o banco do gateway** (necessário se você mudar a identidade de alguma entidade, ou para reconstruir do zero sem derrubar o resto):
 
 ```powershell
@@ -819,7 +837,10 @@ kubectl get pods -n fiapgames
 kubectl create secret generic kong-declarative-config -n fiapgames \
   --from-file=kong.yml.template=kong/kong.k8s.yml --dry-run=client -o yaml | kubectl apply -f -
 
-#    8b. aplica os manifestos. Os prefixos numéricos garantem a ordem, já que
+#    8b. recria o import mesmo se o Job anterior já estiver concluído.
+#        Isso não remove o Postgres nem os dados das aplicações.
+kubectl delete job kong-bootstrap -n fiapgames --ignore-not-found --wait=true
+#        Os prefixos numéricos garantem a ordem, já que
 #        "kubectl apply -f" aplica em ordem alfabética:
 #        00 ConfigMap de conexão -> 01 Job (migrations + seed) -> 02 Kong -> 03 Konga
 kubectl apply -f k8s/kong/
@@ -827,6 +848,8 @@ kubectl apply -f k8s/kong/
 #    8c. confere que o seed rodou (é ele que carrega rotas e políticas no banco)
 kubectl wait --for=condition=complete job/kong-bootstrap -n fiapgames --timeout=180s
 kubectl logs job/kong-bootstrap -n fiapgames
+kubectl rollout restart deployment/kong -n fiapgames
+kubectl rollout status deployment/kong -n fiapgames --timeout=300s
 ```
 
 Pronto — o gateway está em `http://localhost:8000` e é por ali que tudo deve passar:

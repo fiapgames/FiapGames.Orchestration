@@ -134,13 +134,7 @@ for entry in "${SERVICES[@]}"; do
 done
 
 step "API Gateway (Kong + Konga)"
-kubectl create secret generic kong-declarative-config -n "$NAMESPACE" \
-  --from-file=kong.yml.template=kong/kong.k8s.yml --dry-run=client -o yaml | kubectl apply -f -
-kubectl apply -f k8s/kong/
-kubectl wait --for=condition=complete job/kong-bootstrap -n "$NAMESPACE" --timeout=300s
-# O db_import não invalida o cache: um Kong que subiu antes do seed segue sem rotas (404).
-kubectl rollout restart deployment/kong -n "$NAMESPACE"
-kubectl rollout status deployment/kong -n "$NAMESPACE" --timeout=300s
+KUBE_CONTEXT="kind-${CLUSTER}" NAMESPACE="$NAMESPACE" bash ci/bootstrap-kong.sh
 
 step "Aguardando os deployments"
 for deploy in $(kubectl get deployment -n "$NAMESPACE" -o name); do
