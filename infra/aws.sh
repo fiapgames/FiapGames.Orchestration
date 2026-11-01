@@ -241,29 +241,46 @@ cmd_up() {
 delete_k8s_load_balancers() {
   if aws eks describe-cluster --name "$CLUSTER" >/dev/null 2>&1; then
     aws eks update-kubeconfig --name "$CLUSTER" --alias "$CONTEXT" >/dev/null
-    local svc
-    for svc in $(kube get svc -A       -o jsonpath='{range .items[?(@.spec.type=="LoadBalancer")]}{.metadata.namespace}/{.metadata.name}{"
-"}{end}'); do
+    local services svc
+    services="$(kube get svc -A \
+      -o jsonpath='{range .items[?(@.spec.type=="LoadBalancer")]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}')"
+    for svc in $services; do
       kube delete svc -n "${svc%%/*}" "${svc#*/}" --wait=true
     done
   fi
   stack_exists "${PREFIX}-network" || return 0
-  local vpc lb group
+  local vpc lb
   vpc="$(stack_output "${PREFIX}-network" VpcId)"
   # Se o cluster sumiu antes do Service, o load balancer fica órfão e trava a VPC.
-  for lb in $(aws elb describe-load-balancers     --query "LoadBalancerDescriptions[?VPCId=='${vpc}'].LoadBalancerName" --output text); do
+  for lb in $(aws elb describe-load-balancers \
+    --query "LoadBalancerDescriptions[?VPCId=='${vpc}'].LoadBalancerName" --output text); do
     aws elb delete-load-balancer --load-balancer-name "$lb"
   done
   for _ in $(seq 1 30); do
+    local classic network
+    classic="$(aws elb describe-load-balancers --query "length(LoadBalancerDescriptions[?VPCId=='${vpc}'])" --output text)"
+    network="$(aws elbv2 describe-load-balancers --query "length(LoadBalancers[?VpcId=='${vpc}'])" --output text)"
+    [ $((classic + network)) -eq 0 ] && return 0
+    sleep 10
+  done
+  echo "load balancers ainda presentes na VPC ${vpc}; a remoção da rede pode falhar" >&2
+}
+
+# Só sai depois do EKS: o grupo do cluster tem regra apontando para o k8s-elb.
+delete_k8s_elb_groups() {
+  stack_exists "${PREFIX}-network" || return 0
+  local vpc group
+  vpc="$(stack_output "${PREFIX}-network" VpcId)"
+  for _ in $(seq 1 30); do
     local left=0
-    for group in $(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=${vpc}" "Name=group-name,Values=k8s-elb-*"       --query 'SecurityGroups[].GroupId' --output text); do
-      # Só sai depois que a interface do load balancer é liberada.
+    for group in $(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=${vpc}" "Name=group-name,Values=k8s-elb-*" \
+      --query 'SecurityGroups[].GroupId' --output text); do
       aws ec2 delete-security-group --group-id "$group" >/dev/null 2>&1 || left=1
     done
     [ "$left" -eq 0 ] && return 0
     sleep 10
   done
-  echo "load balancers ainda presentes na VPC ${vpc}; a remoção da rede pode falhar" >&2
+  echo "security groups k8s-elb ainda presentes na VPC ${vpc}; a remoção da rede pode falhar" >&2
 }
 
 cmd_down() {
@@ -271,7 +288,10 @@ cmd_down() {
   delete_k8s_load_balancers
   local stacks=()
   while IFS='|' read -r stack _ _; do stacks=("$stack" "${stacks[@]}"); done < <(env_stacks)
-  for stack in "${stacks[@]}"; do delete_stack "$stack"; done
+  for stack in "${stacks[@]}"; do
+    if [ "$stack" = "${PREFIX}-network" ]; then delete_k8s_elb_groups; fi
+    delete_stack "$stack"
+  done
   kubectl config delete-context "$CONTEXT" >/dev/null 2>&1 || true
   echo "Ambiente desligado. Continuam de pé (sem custo por hora): base, ECR e budget."
 }
