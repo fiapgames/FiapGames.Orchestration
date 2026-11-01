@@ -202,6 +202,13 @@ cmd_bootstrap() {
   kube rollout status deployment/kong -n "$NAMESPACE" --timeout=300s
 
   step "Microsserviços (última imagem do ECR)"
+  # Kept separate from the Catalog manifests so an application rollout cannot
+  # overwrite the managed endpoint with a localhost/Kind address.
+  local search_endpoint
+  search_endpoint="$(stack_output "${PREFIX}-opensearch" DomainEndpoint)"
+  [ -n "$search_endpoint" ] && [ "$search_endpoint" != "None" ] || { echo "endpoint OpenSearch ausente" >&2; exit 1; }
+  kube create configmap catalog-search-config -n "$NAMESPACE" \
+    --from-literal="OpenSearch__Url=https://${search_endpoint}" --dry-run=client -o yaml | kube apply -f -
   local registry
   registry="$(stack_output "${PREFIX}-ecr" RegistryUri)"
   for entry in "${SERVICES[@]}"; do

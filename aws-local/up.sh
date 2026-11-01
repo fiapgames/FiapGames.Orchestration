@@ -104,6 +104,7 @@ KUBE_CONTEXT="kind-${CLUSTER}" ci/secrets.sh apply
 step "Infraestrutura compartilhada + OpenSearch"
 kubectl apply -f k8s/
 kubectl apply -f aws-local/opensearch.yaml
+kubectl apply -f aws-local/catalog-search-config.yaml
 
 # shellcheck source=../ci/services.sh
 . ci/services.sh
