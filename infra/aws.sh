@@ -193,13 +193,7 @@ cmd_bootstrap() {
   kube apply -f k8s/
 
   step "API Gateway (Kong + Konga)"
-  kube create secret generic kong-declarative-config -n "$NAMESPACE" \
-    --from-file=kong.yml.template=kong/kong.k8s.yml --dry-run=client -o yaml | kube apply -f -
-  kube apply -f k8s/kong/
-  kube wait --for=condition=complete job/kong-bootstrap -n "$NAMESPACE" --timeout=600s
-  # O db_import não invalida o cache: um Kong que subiu antes do seed segue sem rotas (404).
-  kube rollout restart deployment/kong -n "$NAMESPACE"
-  kube rollout status deployment/kong -n "$NAMESPACE" --timeout=300s
+  KUBE_CONTEXT="$CONTEXT" NAMESPACE="$NAMESPACE" bash ci/bootstrap-kong.sh
 
   step "Microsserviços (última imagem do ECR)"
   # Kept separate from the Catalog manifests so an application rollout cannot
