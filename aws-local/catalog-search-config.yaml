@@ -1,0 +1,9 @@
+# Owned by orchestration, not by the application deployment. EKS supplies its
+# own ConfigMap from the CloudFormation domain endpoint instead of this file.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: catalog-search-config
+  namespace: fiapgames
+data:
+  OpenSearch__Url: "http://opensearch.fiapgames.svc.cluster.local:9200"

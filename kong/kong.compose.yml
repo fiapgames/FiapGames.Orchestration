@@ -79,9 +79,8 @@ services:
               run_on_preflight: false
 
   # ---------------------------------------------------------------------------
-  # CatalogAPI — não tem autenticação nenhuma no código. O gateway é o ÚNICO
-  # ponto de enforcement. O plugin fica no nível do service, cobrindo todas as
-  # rotas abaixo sem repetição.
+  # CatalogAPI valida JWT no próprio código. O gateway também valida o token:
+  # o plugin fica no nível do service, cobrindo todas as rotas abaixo.
   # ---------------------------------------------------------------------------
   - name: catalog-api
     url: http://catalog-api:8080
@@ -94,6 +93,10 @@ services:
     routes:
       - name: catalog-games
         paths: ["/games"]
+        strip_path: false
+
+      - name: catalog-search
+        paths: ["/search"]
         strip_path: false
 
       - name: catalog-orders

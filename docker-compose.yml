@@ -170,6 +170,8 @@ services:
       dockerfile: Dockerfile
     container_name: fiapgames-catalog
     depends_on:
+      opensearch:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
       sqlserver-catalog:
@@ -198,6 +200,8 @@ services:
     environment:
       <<: *newrelic-agent
       NEW_RELIC_APP_NAME: fiapgames-catalog-api
+      OpenSearch__Url: "http://opensearch:9200"
+      OpenSearch__IndexName: "games-v1"
       ConnectionStrings__SqlServer: "Server=sqlserver-catalog,1433;Database=fiapgames-catalog;User Id=sa;Password=${SQLSERVER_CATALOG_PASSWORD};TrustServerCertificate=True"
       RabbitMq__Host: rabbitmq
       RabbitMq__VirtualHost: "/"
@@ -386,6 +390,10 @@ services:
       KONG_ADMIN_ACCESS_LOG: /dev/stdout
       KONG_ADMIN_ERROR_LOG: /dev/stderr
       KONG_NGINX_WORKER_PROCESSES: "1"
+      # Docker can assign a different IP after API restart; do not keep its
+      # previous address for the Docker DNS default TTL (600 seconds).
+      KONG_DNS_VALID_TTL: "5"
+      KONG_DNS_STALE_TTL: "5"
       # Tracing do Kong. O default `off` mantém o comportamento atual: o plugin
       # opentelemetry, mesmo descomentado, não gera span nenhum sem isto.
       # Para ligar, ponha KONG_TRACING_INSTRUMENTATIONS=all e SAMPLING_RATE=1.0

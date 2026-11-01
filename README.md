@@ -75,7 +75,9 @@ FiapGames.Orchestration/
 | `postgres-payments` | 5432 | — |
 | `mongodb` | 27017 | — |
 | `redis` | 6380 (host) → 6379 (container) | — |
-| `catalog-api` | — (só pelo gateway) | rabbitmq, sqlserver-catalog, mongodb, redis |
+| `opensearch` | 9200 | — |
+| `opensearch-dashboards` | 5601 | opensearch |
+| `catalog-api` | — (só pelo gateway) | rabbitmq, sqlserver-catalog, mongodb, redis, opensearch |
 | `payments-api` | — (só pelo gateway) | rabbitmq, postgres-payments |
 | `users-api` | — (só pelo gateway) | rabbitmq, sqlserver-users |
 | `postgres-kong` | — (só interno) | — |
@@ -101,6 +103,7 @@ Roteamento **passthrough**: os paths originais de cada serviço são preservados
 | `users-read` | `GET` | `/api/users`, `/api/users/{id}` | user-api | exigido |
 | `catalog-health` | `GET`, `OPTIONS` | `/health` | catalog-api | **público** (HealthBadge do front) |
 | `catalog-games` | todos | `/games`, `/games/{id}`, `/games/{id}/purchase` | catalog-api | exigido |
+| `catalog-search` | `GET`, `OPTIONS` (uso da API) | `/search` | catalog-api | exigido (exceto preflight) |
 | `catalog-orders` | todos | `/orders`, `/orders/{id}` | catalog-api | exigido |
 | `catalog-library` | todos | `/library/{userId}` | catalog-api | exigido |
 | `payments-health` | `GET`, `OPTIONS` | `/payments/health` | payments-api | **público** (health check) |
@@ -570,7 +573,7 @@ O script substitui os passos 1 a 8 do [passo a passo manual](#passo-a-passo-test
 
 **O cloud-provider-kind roda no host, não em container.** O script baixa o binário da release (com checksum) para `aws-local/.bin/` e o deixa em segundo plano; o log fica em `aws-local/.bin/cloud-provider-kind.log`. Em container, no Docker Desktop, ele não alcança as portas publicadas do Envoy e o `EXTERNAL-IP` fica `<pending>` para sempre. No Windows e no Mac o IP do LB não é roteável do host, então o Envoy publica a porta 80 numa porta aleatória, que o script mostra no final (`no host: http://localhost:<porta>`).
 
-**OpenSearch.** Sem TLS e sem senha localmente; o domínio na AWS terá os dois, então a URL e as credenciais devem vir de configuração, nunca do código.
+**OpenSearch.** O Catalog usa `OpenSearch.Client`, indexação com outbox SQL e `/search` com fuzzy/relevância. Localmente não há TLS nem senha; na AWS o template atual usa HTTPS e controle por VPC/security group, sem usuário/senha ou assinatura IAM. O endpoint vem de configuração, nunca de credenciais fixadas no código.
 
 | Ambiente | URL |
 |---|---|
@@ -579,6 +582,8 @@ O script substitui os passos 1 a 8 do [passo a passo manual](#passo-a-passo-test
 | Kind | `http://opensearch.fiapgames.svc.cluster.local:9200` |
 
 Use o cliente `OpenSearch.Client` no .NET: o `Elastic.Clients.Elasticsearch` verifica se o servidor é Elasticsearch e recusa o OpenSearch.
+
+O ConfigMap `catalog-search-config` pertence à orquestração: o Kind o recebe de `aws-local/catalog-search-config.yaml`, e o bootstrap AWS o cria a partir da saída `DomainEndpoint` do CloudFormation. Os deploys do Catalog preservam essa configuração. A rota `/search` está nos dois arquivos do Kong e herda JWT do serviço Catalog. [Detalhes, reconstrução e testes de integração](../FiapGames.Catalog/SEARCH.md).
 
 ## Segredos
 
